@@ -1,10 +1,17 @@
 #!/usr/bin/env Rscript
-
 set.seed(20260426)
 suppressPackageStartupMessages({
   library(data.table); library(GenomicRanges); library(IRanges)
   library(Biostrings); library(bsseq); library(ggplot2); library(scales); library(patchwork)
 })
+# DESeq2, clusterProfiler, org.Hs.eg.db, DSS and svglite are attached later, where first used.
+
+# ---- [0] Setup: pinned versions, paths, palette, figure helpers -------------
+# Built and validated under R 4.4.1 / Bioconductor 3.20 (Fenix, /opt/apps/r/4.4.1-studio).
+#   data.table 1.18.2.1  GenomicRanges 1.58.0  IRanges 2.40.1     Biostrings 2.74.1
+#   bsseq 1.42.0         ggplot2 4.0.2         scales 1.4.0       patchwork 1.3.2
+#   DESeq2 1.46.0        clusterProfiler 4.14.6  org.Hs.eg.db 3.20.0  DSS 2.54.0  svglite 2.2.2
+# A full machine-checkable record is written to sessionInfo_03_promoters.txt at the end of the run.
 
 PIPE <- "/mnt/data/alfredvar/rlopezt/meth_paper/main/methylation_pipeline"
 B01 <- file.path(PIPE, "01_genome_toolkit/objects"); B02 <- file.path(PIPE, "02_landscape/objects")
@@ -12,9 +19,11 @@ BATCH <- file.path(PIPE, "03_promoters")
 DAT <- file.path(BATCH, "data"); FIGM <- file.path(BATCH, "figures/main")
 FIGS <- file.path(BATCH, "figures/supplementary")
 for (d in c(DAT, FIGM, FIGS)) dir.create(d, showWarnings = FALSE, recursive = TRUE)
-keep_chr <- c(paste0("chr", 1:31), "HiC_scaffold_1563")  # chr1-31 + mito scaffold (2026-08-17)
+keep_chr <- c(paste0("chr", 1:31), "HiC_scaffold_1563")
 
 COL_WEBER <- c(HCP = "#117733", ICP = "#88CCEE", LCP = "#CC6677")
+# Plot-only x-limit (Weber Fig 2 stops at 1.2; <0.3% of promoters exceed it).
+# Classification and every TSV use the FULL data; drop_note() reports each drop.
 OE_MAX <- 1.2
 drop_note <- function(x, nm) {
   n <- sum(x > OE_MAX, na.rm = TRUE)
@@ -26,11 +35,13 @@ theme_pub <- function() theme_classic(base_size = 9, base_family = "sans") +
         plot.subtitle = element_text(size = 8, colour = "grey30"),
         panel.grid.major.y = element_line(linewidth = 0.25, colour = "grey90"))
 save_fig <- function(p, name, w, h) {
+  # cairo_pdf so the β glyph in axis labels renders in the PDF
   ggsave(file.path(FIGM, paste0(name, ".pdf")), p, width = w, height = h, device = cairo_pdf)
   ggsave(file.path(FIGM, paste0(name, ".png")), p, width = w, height = h, dpi = 150)
   ggsave(file.path(FIGM, paste0(name, ".svg")), p, width = w, height = h)   # vector (svg)
   cat(sprintf("  saved %s\n", name))
 }
+# same as save_fig but into figures/supplementary
 save_supp <- function(p, name, w, h) {
   ggsave(file.path(FIGS, paste0(name, ".pdf")), p, width = w, height = h, device = cairo_pdf)
   ggsave(file.path(FIGS, paste0(name, ".png")), p, width = w, height = h, dpi = 150)
@@ -38,12 +49,17 @@ save_supp <- function(p, name, w, h) {
   cat(sprintf("  saved %s\n", name))
 }
 
+# ---- [1] Load genome / GFF / bsseq (01_genome_toolkit + 02_landscape chrmt objects) --------
 cat("[1] load genome / gff / bsseq (from lower batches)\n")
 genome <- readRDS(file.path(B01, "genome_chrmt.rds"))
 gff    <- readRDS(file.path(B01, "gff_chrmt.rds"))
 bs     <- readRDS(file.path(B02, "bsseq_cov5_chrmt.rds"))
 chr_len <- setNames(width(genome), names(genome))
 
+# ---- [2] Weber promoter classification (sliding 500-bp, -1300/+200) ---------
+# weber_sliding(): scan each promoter with 500-bp windows at 5-bp offset; return
+# class + max window O/E + whole-promoter O/E. A single whole-window O/E averages
+# a local CpG island away; the sliding max recovers it (the faithful Weber method).
 weber_sliding <- function(gen, dt, w = 500L, off = 5L) {
   cls <- character(nrow(dt)); mxoe <- rep(NA_real_, nrow(dt)); whoe <- rep(NA_real_, nrow(dt))
   for (ac in intersect(unique(dt$seqid), names(gen))) {
@@ -55,8 +71,13 @@ weber_sliding <- function(gen, dt, w = 500L, off = 5L) {
       gw <- letterFrequencyInSlidingView(s, w, "G")[, 1]
       nwin <- Ls - w + 1L
       cg <- integer(Ls); st <- start(matchPattern("CG", s, fixed = TRUE)); if (length(st)) cg[st] <- 1L
+      # Weber defines TWO O/E quantities: the sliding-window ratio (classification)
+      # and the whole-promoter ratio -- the x-axis of Weber Fig 2 (their HCP histogram
+      # extends BELOW 0.75, impossible for a sliding max). Classify max_oe; plot whole_oe.
       fr <- letterFrequency(s, c("C", "G"))
       whoe[idx[m]] <- (sum(cg) * Ls) / max(fr[["C"]] * fr[["G"]], 1)
+      # window i spans [i, i+w-1] -> CpGs = ccg[i+w-1] - ccg[i-1]; use ccg[w:Ls], NOT
+      # ccg[w:(Ls-1)], which recycles and corrupts the last window into a negative count
       ccg <- cumsum(cg); cgw <- ccg[w:Ls] - c(0, ccg[1:(nwin - 1)])
       oe <- (cgw * w) / pmax(cw * gw, 1); gc <- 100 * (cw + gw) / w
       sel <- seq(1L, nwin, by = off); oe <- oe[sel]; gc <- gc[sel]
@@ -85,6 +106,10 @@ pdt <- as.data.table(prom)[, .(seqnames = as.character(seqnames), start, end,
 pdt[, `:=`(seqid = seqnames, ps = start, pe = end)]
 pdt <- cbind(pdt, weber_sliding(genome, pdt))                  # adds max_oe + whole_oe + weber_class
 pdt <- pdt[is.finite(max_oe) & is.finite(whole_oe)]
+# MAIN analysis (fig3a-g) is PROTEIN-CODING ONLY, matching Weber 2007's validated
+# protein-coding set; lncRNA adds CpG-poor promoters that pile into LCP and
+# flatten the human bimodality. pdt_all keeps all biotypes -- NOTE: no code below
+# writes the by-biotype supplementary any more (the figS3_*_by_biotype files on
 pdt_all <- copy(pdt)
 pdt <- pdt[biotype == "protein_coding"]
 class_n <- pdt[, .N, by = weber_class][order(weber_class)][, pct := 100*N/sum(N)][]
@@ -95,16 +120,19 @@ cat(sprintf("  %d promoters: HCP %d / ICP %d / LCP %d\n", nrow(pdt),
             class_n[weber_class=="HCP", N], class_n[weber_class=="ICP", N],
             class_n[weber_class=="LCP", N]))
 
+# -- fig3a: combined Weber histogram (whole_oe, protein coding) --
 drop_note(pdt$whole_oe, "fig3a/b D. laeve")
 pa <- ggplot(pdt[whole_oe <= OE_MAX], aes(whole_oe, fill = weber_class)) +
   geom_histogram(bins = 80, colour = "white", linewidth = 0.05) +
   scale_fill_manual(values = COL_WEBER, name = "Promoter class (Weber 2007)") +
   scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.05))) +
+  # short x label: the full window string clips at this panel width; window in subtitle
   labs(x = "CpG observed/expected (entire promoter)", y = "Promoters",
        title = "Promoter CpG content of protein-coding genes",
        subtitle = sprintf("D. laeve, n = %s promoters, -1300/+200 window", comma(nrow(pdt)))) + theme_pub()
 save_fig(pa, "fig3a_promoter_cpg_oe_histogram", 4.6, 3.0)
 
+# -- fig3b: per-class faceted histogram --
 nb3 <- pdt[, .N, by = weber_class]
 pdt[, class_lab := factor(sprintf("%s (n = %s)", weber_class, comma(nb3$N[match(weber_class, nb3$weber_class)])),
                           levels = sprintf("%s (n = %s)", levels(weber_class),
@@ -115,11 +143,14 @@ pb <- ggplot(pdt[whole_oe <= OE_MAX], aes(whole_oe, fill = weber_class)) +
   scale_fill_manual(values = COL_WEBER, guide = "none") +
   scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.05))) +
   labs(x = "CpG observed/expected (entire promoter)", y = "Count",
-       title = "CpG O/E distribution by promoter class",   # title clipped at the right edge fixed (author 2026-09-01)
+       title = "CpG O/E distribution by promoter class",
        subtitle = sprintf("D. laeve protein-coding genes, n = %s promoters", comma(nrow(pdt)))) +
   theme_pub() + theme(strip.background = element_blank())
 save_fig(pb, "fig3b_promoter_oe_distribution_by_class", 4.0, 4.7)
 
+# ---- [3] Pooled promoter methylation (all 4 WGBS samples) + fig3c -----------
+# per-gene promoter beta, C1+C2+A1+A2 pooled; writes
+# promoter_methylation_per_gene.tsv (reused by [7], [9] and 07_wgcna section 5).
 chrs <- as.character(seqnames(bs)); bs <- bs[chrs %in% keep_chr, ]
 gr <- granges(bs)
 M_all <- rowSums(as.matrix(getCoverage(bs, type = "M")))
@@ -133,6 +164,7 @@ ovp <- foverlaps(cpg_all, prom_pool, nomatch = 0L)
 prom_meth <- ovp[, .(mean_meth = sum(M)/pmax(sum(C),1), n_cpg = .N), by = gene_id]
 fwrite(prom_meth, file.path(DAT, "promoter_methylation_per_gene.tsv"), sep = "\t")
 
+# -- fig3c: HCP promoters ranked by pooled methylation --
 g_id <- sub(";.*", "", as.character(mcols(gene_gr)$ID))
 g_note <- vapply(mcols(gene_gr)$Note, function(x) if (length(x)) as.character(x)[1] else NA_character_, character(1))
 parse_name <- function(note, fb) {
@@ -143,9 +175,13 @@ hcp <- pdt[weber_class == "HCP"]
 hcp[, gene_name := parse_name(g_note[match(gene_id, g_id)], gene_id)]
 hcp <- merge(hcp, prom_meth, by = "gene_id", all.x = TRUE)
 hcp <- hcp[!is.na(mean_meth)][order(-mean_meth)]
+# ones with their LOC id, never merge. Also keeps `label` unique --
+# factor(levels = rev(x)) dies on duplicates (the trap that broke fig3c once).
 dup_sym <- duplicated(hcp$gene_name) | duplicated(hcp$gene_name, fromLast = TRUE)
 hcp[dup_sym, gene_name := paste0(gene_name, " [", gene_id, "]")]
 hcp[, label := paste0(gene_name, " (", round(100*mean_meth, 1), "%)")]
+# Plot the top N only (one row per covered HCP gene is an unplottable axis); every
+# gene stays in promoter_methylation_per_gene.tsv -- the figure shows the methylated extreme.
 topn <- 40L
 hcp_plot <- head(hcp, topn)
 stopifnot(!any(duplicated(hcp_plot$label)))       # factor(levels=) needs unique levels
@@ -158,11 +194,12 @@ pc <- ggplot(hcp_plot, aes(100*mean_meth, y, fill = 100*mean_meth)) +
   scale_fill_gradient(low = "#FDF2E9", high = "#C0392B", name = "β (%)", limits = c(0, 100)) +
   labs(x = "Mean promoter β (%)", y = NULL,
        title = sprintf("Top %d HCP promoters ranked by methylation", nrow(hcp_plot)),
-       subtitle = sprintf("of %s HCP promoters with cov>=5 in all 4 samples; full list in promoter_methylation_per_gene.tsv",
+       subtitle = sprintf("of %s HCP promoters with >= 1 CpG covered (cov >= 5 in all 4 samples); full list in promoter_methylation_per_gene.tsv",
                           comma(nrow(hcp)))) +
   theme_pub() + theme(axis.text.y = element_text(size = 6.5))
 save_fig(pc, "fig3c_hcp_gene_list", 5.8, max(4.0, 0.18*nrow(hcp_plot) + 1))
 
+# ---- [4] fig3d: TSS metagene by promoter class (all 4 samples, pooled) ------
 M <- as.matrix(getCoverage(bs, type = "M")); Cv <- as.matrix(getCoverage(bs, type = "Cov"))
 M_pool <- rowSums(M); C_pool <- rowSums(Cv)              # pool all 4 samples (C1,C2,A1,A2)
 cpg <- data.table(chr = as.character(seqnames(gr)), pos = start(gr),
@@ -189,6 +226,11 @@ pd <- ggplot(agg, aes(bc/1000, beta*100, colour = weber_class)) +
   theme_pub()
 save_fig(pd, "fig3d_metagene_by_promoter_class", 3.4, 2.2)
 
+# ---- [5] Human GRCh38 comparison (fig3e): same classifier, same window ------
+# RefSeq. The dataset/ cache is pre-staged on a login node; defq compute nodes
+# have NO internet, so the wget fallback must never fire there.
+# (ls -l before trusting: fna 972,898,531 B, gff 77,807,126 B), and the URL is the
+# UNVERSIONED GRCh38_latest -- a re-fetch could silently change the human control.
 cat("[5] human GRCh38 promoter CpG O/E vs D. laeve (fig3e)\n")
 DS <- file.path(BATCH, "dataset"); dir.create(DS, showWarnings = FALSE, recursive = TRUE)
 hs_fna <- file.path(DS, "GRCh38_latest_genomic.fna.gz")
@@ -196,11 +238,18 @@ hs_gff <- file.path(DS, "GRCh38_latest_genomic.gff.gz")
 url <- "https://ftp.ncbi.nlm.nih.gov/refseq/H_sapiens/annotation/GRCh38_latest/refseq_identifiers"
 if (!file.exists(hs_fna)) system2("wget", c("-q","-c", file.path(url,"GRCh38_latest_genomic.fna.gz"), "-O", hs_fna))
 if (!file.exists(hs_gff)) system2("wget", c("-q","-c", file.path(url,"GRCh38_latest_genomic.gff.gz"), "-O", hs_gff))
+# a failed wget -O leaves a ZERO-BYTE file that passes file.exists() forever; the good
+# cache is 972,898,531 / 77,807,126 B, so any truncation fails these floors loudly
 stopifnot(file.size(hs_fna) > 5e8, file.size(hs_gff) > 5e7)
 
+# primary chromosomes only: chr1-22 (NC_000001..NC_000022), X (NC_000023), Y (NC_000024)
 hs_primary <- c(sprintf("NC_0000%02d", 1:22), "NC_000023", "NC_000024")
+# human genes -> TSS -> Weber -1300/+200 region; sliding-500bp classification
 hg <- fread(cmd = sprintf("zcat '%s' | grep -v '^#'", hs_gff), sep = "\t", header = FALSE, quote = "",
             col.names = c("seqid","src","type","start","end","score","strand","phase","attr"))
+# type=="gene" alone silently drops ~16.9k human pseudogenes, while D. laeve
+# pseudogenes arrive as type=="gene". Keep both for cross-species parity (the
+# main fig3a-e set is protein_coding-only, so this does not touch it).
 hg <- hg[type %in% c("gene", "pseudogene") & sub("\\..*", "", seqid) %in% hs_primary]
 hg[, biotype := sub(".*gene_biotype=([^;]+).*", "\\1", attr)]
 hg[, tss := ifelse(strand == "-", end, start)]; hneg <- hg$strand == "-"
@@ -216,6 +265,8 @@ hoe <- hoe[is.finite(max_oe) & is.finite(whole_oe)]
 hoe_all <- copy(hoe)                                    # all biotypes; currently unused (by-biotype supp not written)
 hoe <- hoe[biotype == "protein_coding"]   # main: protein-coding only (Weber's set)
 fwrite(hoe[, .(max_oe, whole_oe, weber_class)], file.path(DAT, "human_promoter_cpg_oe.tsv"), sep = "\t")
+# Replication check vs Weber 2007 Fig 2 (n=15,609 hg17 validated promoters:
+# HCP 64% / ICP 13% / LCP 23%); our GRCh38 RefSeq n differs, split should land close.
 hpct <- function(cl) 100 * mean(hoe$weber_class == cl)
 cat(sprintf("  %d human promoters -> HCP %.0f%% / ICP %.0f%% / LCP %.0f%%  (Weber 2007: 64/13/23)\n",
             nrow(hoe), hpct("HCP"), hpct("ICP"), hpct("LCP")))
@@ -223,29 +274,38 @@ cat(sprintf("  D. laeve            -> HCP %.0f%% / ICP %.0f%% / LCP %.0f%%\n",
             100*mean(pdt$weber_class == "HCP"), 100*mean(pdt$weber_class == "ICP"),
             100*mean(pdt$weber_class == "LCP")))
 
+# -- fig3e: two-species histograms + class pies (Weber 2007 Fig 3c style) --
+# protein-coding only; D. laeve left, human right
 cmp <- rbind(data.table(species = "D. laeve",   whole_oe = pdt$whole_oe, weber_class = pdt$weber_class),
              data.table(species = "H. sapiens", whole_oe = hoe$whole_oe, weber_class = hoe$weber_class))
 cmp[, species := factor(species, levels = c("D. laeve", "H. sapiens"))]     # slug left, human right
 drop_note(cmp[species == "D. laeve", whole_oe],   "fig3e D. laeve")
 drop_note(cmp[species == "H. sapiens", whole_oe], "fig3e H. sapiens")
+# facet label carries n per species
 n_sp <- cmp[, .N, by = species]
 sp_lab <- setNames(sprintf("%s (n = %s)", levels(cmp$species),
                            comma(n_sp$N[match(levels(cmp$species), n_sp$species)])), levels(cmp$species))
 cmp[, species_lab := factor(sp_lab[as.character(species)], levels = sp_lab)]
+# they threshold the sliding-window ratio, not this axis -- a vline would imply a
+# rule that does not apply (LOCKED convention, see header RULES).
 pe_hist <- ggplot(cmp[whole_oe <= OE_MAX], aes(whole_oe, fill = weber_class)) +
   geom_histogram(bins = 80, colour = "white", linewidth = 0.05) +
   facet_wrap(~ species_lab, scales = "free_y") +
   scale_fill_manual(values = COL_WEBER, name = "Promoter class (Weber 2007)") +
   scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.05))) +
-  scale_x_continuous(breaks = seq(0, 1.2, 0.4)) +   # default breaks overprinted into "0.000.25..." at the old 5-in canvas (QA 2026-08-28)
+  scale_x_continuous(breaks = seq(0, 1.2, 0.4)) +
   labs(x = "Promoter CpG observed/expected (entire promoter, -1300/+200)", y = "Promoters",
        title = "Promoter CpG content of protein-coding genes: D. laeve vs human") +
   theme_pub() + theme(strip.background = element_blank(),
-                      plot.margin = margin(5.5, 5.5, 5.5, 10))  # x-axis label sat flush at the left canvas edge (QA 2026-08-28)
+                      plot.margin = margin(5.5, 5.5, 5.5, 10))
 mk_pie <- function(sp) {
+  # pies use ALL promoters of that species (not the OE_MAX-trimmed plotting subset),
+  # so the percentages match the class split printed above. n is on the facet strip.
   tab <- cmp[species == sp, .N, by = weber_class][, frac := N/sum(N)][order(weber_class)]
+  # a <8% wedge is too thin to hold its label: push those outside, and stagger the
+  # radius so two ADJACENT small wedges (D. laeve HCP 4% + LCP 4%) cannot collide
   tab[, rad := 1]
-  tab[frac >= 0.08 & frac < 0.30, rad := 1.35]  # mid-size wedges (human ICP 23%/LCP 24%) collided at the centre (QA 2026-08-28)
+  tab[frac >= 0.08 & frac < 0.30, rad := 1.35]
   tab[frac < 0.08, rad := ifelse(seq_len(.N) %% 2 == 1, 1.6, 2.0)]
   ggplot(tab, aes(x = 1, y = frac, fill = weber_class)) +
     geom_col(width = 1, colour = "white", linewidth = 0.3) + coord_polar(theta = "y") +
@@ -256,12 +316,24 @@ mk_pie <- function(sp) {
     labs(title = sp) + theme_void() +
     theme(plot.title = element_text(hjust = 0.5, size = 9.5, face = "italic"))
 }
+# the wider canvas also un-clips the title, the facet strips and the x-axis label.
 pe <- (pe_hist | (mk_pie("D. laeve") / mk_pie("H. sapiens"))) + plot_layout(widths = c(2, 1))
 save_fig(pe, "fig3e_promoter_cpg_oe_human_vs_dlaeve", 7.2, 3.6)
 
+# ---- [6] REMOVED: figS3_weber_tss1kb TSS+-1kb sensitivity ----
+
+# ---- [7] fig3f: expression vs promoter methylation, per Weber class ---------
+# Weber 2007 Fig 4e: promoter activity + hypermethylation incompatible for HCP
+# and ICP but NOT LCP. NOT CIRCULAR: the class comes from SEQUENCE alone (O/E + GC).
+# SCOPE: a CONSTITUTIVE cross-gene correlation -- methylation pooled over the 4
+# WGBS samples, expression = mean of ALL 7 tail libraries (unpaired animals). It
+# says NOTHING about the amputation response and does not contradict 07_wgcna's
+# "DMR direction carries no expression information" (a differential claim).
 cat("[7] fig3f expression vs promoter methylation, per Weber class\n")
 suppressPackageStartupMessages(library(DESeq2))
 HTSEQ <- "/mnt/data/alfredvar/jmiranda/20-Transcriptomic_Bulk/25-metaAnalysisTranscriptome/counts_HTseq_EviAnn"
+# sample map rebuilt from filenames, no external metadata (matches 01_genome_toolkit §6):
+# tail control C1S1..C4S4 ; tail amputated T2S6/T3S7/T4S8 (T1S5 excluded at gene level)
 rna <- data.table(sample = c("C1S1","C2S2","C3S3","C4S4","T2S6","T3S7","T4S8"),
                   condition = c(rep("Control", 4), rep("Amputated", 3)))
 rna[, file := file.path(HTSEQ, paste0(sample, "_htseq_gene_counts.txt"))]
@@ -283,20 +355,29 @@ me <- merge(merge(pdt[, .(gene_id, weber_class)], prom_meth[, .(gene_id, mean_me
 me[, `:=`(beta = 100 * mean_meth, log_expr = log2(mean_expr + 1))]
 fwrite(me, file.path(DAT, "promoter_meth_vs_expression.tsv"), sep = "\t")
 
+# Pearson (as requested) per class; Spearman reported alongside because the
+# methylation-expression relationship is monotonic but not necessarily linear.
 rstat <- me[, {
   ct <- cor.test(beta, log_expr, method = "pearson")
   sp <- suppressWarnings(cor.test(beta, log_expr, method = "spearman", exact = FALSE))
-  .(n = .N, r = unname(ct$estimate), p = ct$p.value, rho = unname(sp$estimate))
+  .(n = .N, r = unname(ct$estimate), p = ct$p.value, rho = unname(sp$estimate), p_rho = sp$p.value)
 }, by = weber_class][order(weber_class)]
+# STAT TEST: Pearson and Spearman correlation tests (cor.test) of promoter beta vs log2 expression,
+# per Weber class, plus the genome-wide Spearman the Results quote
+rall <- me[, { sp <- suppressWarnings(cor.test(beta, log_expr, method = "spearman", exact = FALSE))
+               ct <- cor.test(beta, log_expr, method = "pearson")
+               .(weber_class = "All", n = .N, r = unname(ct$estimate), p = ct$p.value,
+                 rho = unname(sp$estimate), p_rho = sp$p.value) }]
+rstat <- rbind(rstat, rall)
 fwrite(rstat, file.path(DAT, "promoter_meth_expr_correlation.tsv"), sep = "\t")
 cat("  Pearson r (promoter beta vs log2 expression), per Weber class:\n")
 for (i in seq_len(nrow(rstat)))
   cat(sprintf("    %-3s n=%6s  r=%+.3f  p=%-10.3g  (Spearman rho=%+.3f)\n",
               rstat$weber_class[i], comma(rstat$n[i]), rstat$r[i], rstat$p[i], rstat$rho[i]))
 
-lab <- rstat[, .(weber_class,
-                 lab = sprintf("r = %+.2f\np = %s\nn = %s", r,
-                               format.pval(p, digits = 2, eps = 1e-16), comma(n)))]
+lab <- rstat[weber_class != "All", .(weber_class,
+                 lab = sprintf("rho = %+.2f (P = %s)\nr = %+.2f\nn = %s", rho,
+                               format.pval(p_rho, digits = 2, eps = 1e-16), r, comma(n)))]   # Spearman = the statistic the text reports
 pf <- ggplot(me, aes(beta, log_expr)) +
   geom_point(aes(colour = weber_class), alpha = 0.10, size = 0.35) +
   geom_smooth(method = "lm", formula = y ~ x, colour = "black", linewidth = 0.5) +
@@ -311,13 +392,20 @@ pf <- ggplot(me, aes(beta, log_expr)) +
   theme_pub() + theme(strip.background = element_blank())
 save_fig(pf, "fig3f_promoter_meth_vs_expression", 7.5, 3.2)
 
+# ---- [8] GO/KEGG over-representation by Weber class, per species ------------
+# Classes tested SEPARATELY (class genes vs all classified genes of the species).
+# D. laeve = STRING v12 terms via enricher (no OrgDb exists); human = org.Hs.eg.db
 cat("[8] GO over-representation by Weber promoter class (D. laeve + human)\n")
 suppressPackageStartupMessages(library(clusterProfiler))
 GO_CATS <- c(BP = "Biological Process (Gene Ontology)", MF = "Molecular Function (Gene Ontology)",
              CC = "Cellular Component (Gene Ontology)",
              KEGG = "KEGG (Kyoto Encyclopedia of Genes and Genomes)")
+# Dotplot x = FOLD ENRICHMENT, not -log10(FDR): the FDR axis is dominated by set
+# size and ranks huge low-fold housekeeping terms above specific ones. Colour =
+# raw BH FDR, size = gene count; Count>=5 drops tiny noise terms.
 CLS_GO <- c("HCP", "ICP", "LCP")
 go_dot <- function(dt) {                         # shared aesthetic for every GO dotplot
+  # colour = raw BH FDR (dark red = most significant); legend reads actual FDRs
   ggplot(dt, aes(FoldEnrichment, lab, size = Count, colour = p.adjust)) +
     geom_point() +
     scale_colour_gradient(low = "#7B241C", high = "#F5CBA7", name = "BH FDR",
@@ -326,6 +414,7 @@ go_dot <- function(dt) {                         # shared aesthetic for every GO
     labs(x = "Fold enrichment (observed / expected)", y = NULL) +
     theme_pub() + theme(axis.text.y = element_text(size = 6))
 }
+# go_class_figs(): ONE combined figure per species, plotted classes stacked on a
 go_class_figs <- function(godt, tag, name, to_main = FALSE, classes = CLS_GO) {
   sig <- godt[p.adjust < 0.05 & Count >= 5 & is.finite(FoldEnrichment)]
   sig[, weber_class := factor(weber_class, levels = CLS_GO)]
@@ -334,6 +423,9 @@ go_class_figs <- function(godt, tag, name, to_main = FALSE, classes = CLS_GO) {
   sig <- sig[as.character(weber_class) %in% classes]
   CLS_GO <- classes                      # local: drives facets, placeholders and levels
   sig[, weber_class := factor(as.character(weber_class), levels = CLS_GO)]
+  # A plain top-8 by fold plots ZERO KEGG on the human HCP panel (the best KEGG fold
+  # sits just below the 8th GO term): take the best KEGG first (<= 1/4 of each class's
+  # rows), then fill by fold. `sig` is already FDR<0.05 & Count>=5; ties broken by p.adjust.
   NPER <- 8L
   pick_terms <- function(d) {
     nk   <- min(sum(d$ontology == "KEGG"), NPER %/% 4L)
@@ -343,30 +435,39 @@ go_class_figs <- function(godt, tag, name, to_main = FALSE, classes = CLS_GO) {
   }
   comb <- sig[, pick_terms(.SD), by = weber_class]
   if (!nrow(comb)) return(invisible())
+  # a class with NO enriched term would leave an empty facet, which crashes
+  # facet_grid(space="free_y") with a non-finite height. Give each empty class ONE
+  # placeholder row (NA fold -> no point) so its facet reads "no term at FDR<0.05".
   miss <- setdiff(CLS_GO, as.character(unique(comb$weber_class)))
   if (length(miss)) comb <- rbind(comb, data.table(weber_class = factor(miss, levels = CLS_GO),
                         Description = paste0(miss, ": no term at FDR<0.05"),
                         FoldEnrichment = NA_real_, Count = NA_integer_, p.adjust = NA_real_), fill = TRUE)
   comb[, weber_class := factor(as.character(weber_class), levels = CLS_GO)]
+  # Append the source ontology to each label ("Lysosome (KEGG)"), matching the 05_differential
   if (!"ontology" %in% names(comb)) comb[, ontology := NA_character_]
   comb[, Description := ifelse(is.na(ontology), Description,
                                sprintf("%s (%s)", Description, ontology))]
+  # Wrap long term labels: the human MF/CC names run to ~70 characters, and unwrapped
   comb[, Description := vapply(Description, function(s)
     paste(strwrap(s, width = 40), collapse = "\n"), character(1))]
   comb[, lab := factor(make.unique(Description), levels = rev(make.unique(Description)))]
   p <- go_dot(comb) +
     facet_grid(weber_class ~ ., scales = "free_y", space = "free_y", drop = FALSE) +
-    labs(title = sprintf("%s: GO and KEGG by Weber classes", name)) +   # the TSV carries KEGG rows too; "GO" alone would mislabel; "classes" plural = author 2026-08-28
+    labs(title = sprintf("%s: GO and KEGG by Weber classes", name)) +
     theme(strip.background = element_blank(),
-          plot.title = element_text(size = rel(1)),   # the default rel(1.2) bold title clipped at the canvas edge (QA 2026-08-28)
+          plot.title = element_text(size = rel(1)),
           plot.title.position = "plot",  # "panel" anchoring pushed the title right of the wide y-label block, off the canvas
-          legend.key.height = unit(10, "pt"))  # BH FDR colourbar clipped at the top edge on the human figure (QA 2026-08-28)
+          legend.key.height = unit(10, "pt"))
+  # edge and at 3.3 in the human figure's label block left the panel zero-width
   h <- max(2.4, 4.0 * length(CLS_GO) / 3)
   if (to_main) save_fig(p, sprintf("fig3g_%s_weber_class_go", tag), 4.6, h)
-  else         save_supp(p, sprintf("figS3_%s_weber_class_go", tag), 4.8, max(2.6, h * 0.85))
+  else         save_supp(p, sprintf("figS3_%s_weber_class_go", tag), 4.8, max(2.6, h * 1.15))
 }
 
+# --- D. laeve: STRING v12 route ---
 STRING_ENR <- "/mnt/data/alfredvar/30-Genoma/31-Alternative_Annotation_EviAnn/STRING.protein.enrichment.terms.v12.0.txt"
+# KEGG tables cached once under tools/kegg/ and read BY PATH (compute nodes have
+# no outbound internet); refresh via the curl calls recorded in tools/kegg/.
 KEGG_LINK  <- "/mnt/data/alfredvar/rlopezt/meth_paper/tools/kegg/hsa_pathway_link.tsv"
 KEGG_NAMES <- "/mnt/data/alfredvar/rlopezt/meth_paper/tools/kegg/hsa_pathway_names.tsv"
 dl_cls <- pdt[biotype == "protein_coding" & !is.na(weber_class), .(gene_id, weber_class)]
@@ -377,6 +478,8 @@ run_enr_dl <- function(sig, uni_genes, cat_label) {              # one class x o
   uni <- intersect(unique(sub$gene_id), uni_genes)
   hit <- intersect(sig, uni)
   if (length(hit) < 5) return(data.table())
+  # STAT TEST: hypergeometric ORA (clusterProfiler enricher), BH-adjusted.
+  # never the whole STRING table (the inflated-universe bug that voided 05_differential's DMR terms).
   res <- suppressWarnings(enricher(gene = hit, universe = uni, TERM2GENE = sub[, .(term, gene_id)],
            TERM2NAME = unique(sub[, .(term, description)]), pAdjustMethod = "BH",
            pvalueCutoff = 1, qvalueCutoff = 1, minGSSize = 5, maxGSSize = 500))
@@ -397,6 +500,7 @@ cat(sprintf("  D. laeve GO/KEGG at FDR<0.05: %s\n",
               collapse = " ")))
 go_class_figs(dl_go, "dlaeve", "D. laeve", to_main = TRUE)
 
+# --- human: org.Hs.eg.db route (no human STRING file exists) ---
 hg_go <- tryCatch({
   suppressPackageStartupMessages(library(org.Hs.eg.db))
   hgc <- hg[type == "gene" & biotype == "protein_coding"]
@@ -407,8 +511,13 @@ hg_go <- tryCatch({
   hgc <- hgc[!is.na(weber_class) & !is.na(symbol) & symbol != ""]
   uni_h <- unique(hgc$symbol)
   cat(sprintf("  human classified protein-coding genes for GO: %d\n", length(uni_h)))
+  # enrichGO ont="ALL" gives BP/MF/CC (ONTOLOGY renamed to `ontology` to match the
+  # D. laeve table); KEGG comes from the CACHED tools/kegg tables via enricher, which
+  # needs ENTREZ ids (mapped through org.Hs.eg.db). The KEGG arm is wrapped so any
+  # failure degrades to GO-only instead of killing the batch.
   rbindlist(lapply(c("HCP", "ICP", "LCP"), function(cl) {
     cl_sym <- unique(hgc[weber_class == cl]$symbol)
+    # STAT TEST: hypergeometric over-representation (clusterProfiler enrichGO), BH-adjusted
     e <- enrichGO(gene = cl_sym, OrgDb = org.Hs.eg.db,
                   keyType = "SYMBOL", ont = "ALL", universe = uni_h,
                   pAdjustMethod = "BH", pvalueCutoff = 1, qvalueCutoff = 1)
@@ -418,6 +527,9 @@ hg_go <- tryCatch({
       s2e <- function(v) unique(na.omit(AnnotationDbi::mapIds(
                org.Hs.eg.db, keys = v, keytype = "SYMBOL", column = "ENTREZID",
                multiVals = "first")))
+      # with enricher() = the identical hypergeometric test, no network call.
+      #   hsa_pathway_link.tsv : "path:hsa04973<TAB>hsa:57818"  (pathway -> Entrez gene)
+      #   hsa_pathway_names.tsv: "hsa01522<TAB>Endocrine resistance - Homo sapiens (human)"
       kl <- fread(KEGG_LINK, header = FALSE, col.names = c("term", "gene"))
       kl[, `:=`(term = sub("^path:", "", term), gene = sub("^hsa:", "", gene))]
       kn <- fread(KEGG_NAMES, header = FALSE, col.names = c("term", "name"))
@@ -440,27 +552,28 @@ if (nrow(hg_go)) {
               paste(sprintf("%s=%d", c("HCP","ICP","LCP"),
                 vapply(c("HCP","ICP","LCP"), function(cl) nrow(hg_go[weber_class==cl & p.adjust<0.05]), integer(1))),
                 collapse = " ")))
-  go_class_figs(hg_go, "human", "H. sapiens")   # all three classes (author 2026-09-01; was HCP only 2026-07-25)
+  go_class_figs(hg_go, "human", "H. sapiens")
 }
 
+# ---- [9] Weber-class methylation & expression characterisation (supp only) --
+# All three classes on: (a) methylation status, (b) basal expression level,
+# (c) methylated vs silent. Reuses prom_meth/pdt + 01_genome_toolkit's DE table (an allowed
+# upstream read). The HCP-with-DMR panels live in 06_decoupling section 5 (they need 05_differential).
 cat("[9] Weber-class promoter methylation & expression characterisation\n")
 DE_TAIL3 <- file.path(PIPE, "01_genome_toolkit/data/gene_de_tail.tsv")
 de3 <- fread(DE_TAIL3)[, .(gene_id, baseMean, log2FoldChange, padj)]
 CLS <- c("HCP", "ICP", "LCP")
+METH_CUT <- 0.2   # "methylated promoter" = mean beta > 0.2: a convention (stated in Methods), not a fitted value
 cls_ids <- lapply(CLS, function(cl) pdt[biotype == "protein_coding" & weber_class == cl, gene_id])
 names(cls_ids) <- CLS
-hcp_ids <- cls_ids$HCP                            # leftover of (d), moved to 07_wgcna; unused below
-note3 <- vapply(mcols(gene_gr)$Note, function(x) if (length(x)) as.character(x)[1] else NA_character_, character(1))
-sym3  <- sub("^Similar to ([^:]+):.*$", "\\1", note3); sym3[!grepl("^Similar to [^:]+:", note3)] <- NA
-symmap3 <- setNames(sym3, sub(";.*", "", as.character(mcols(gene_gr)$ID)))
-disp3 <- function(x) ifelse(is.na(symmap3[x]), x, symmap3[x])
 
+# (a) methylation STATUS per class: no-coverage, covered-unmethylated, covered-methylated
 status <- rbindlist(lapply(CLS, function(cl) {
   ids <- cls_ids[[cl]]; cm <- prom_meth[gene_id %in% ids]
   data.table(weber_class = cl, n_total = length(ids),
              `No coverage` = length(ids) - nrow(cm),
-             `Covered, unmethylated` = sum(cm$mean_meth <= 0.2),
-             `Covered, methylated`   = sum(cm$mean_meth > 0.2))
+             `Covered, unmethylated` = sum(cm$mean_meth <= METH_CUT),
+             `Covered, methylated`   = sum(cm$mean_meth > METH_CUT))
 }))
 fwrite(status, file.path(DAT, "weber_class_methylation_status.tsv"), sep = "\t")
 print(status)
@@ -479,8 +592,10 @@ p_stat <- ggplot(sl, aes(weber_class, pct, fill = state)) +
   theme_pub() + theme(legend.position = "bottom")
 save_supp(p_stat, "figS3_weber_class_methylation_status", 6.5, 4.0)
 
+# (b) BASAL expression level per class (answers "are HCP the basally-expressed ones?")
 bas <- rbindlist(lapply(CLS, function(cl) de3[gene_id %in% cls_ids[[cl]], .(weber_class = cl, gene_id, baseMean)]))
 bas[, weber_class := factor(weber_class, levels = CLS)]
+# STAT TEST: Kruskal-Wallis rank-sum test (baseMean across the three Weber classes)
 kw_bas <- kruskal.test(baseMean ~ weber_class, data = bas)
 med_bas <- bas[, .(med = median(baseMean, na.rm = TRUE)), by = weber_class]
 fwrite(med_bas, file.path(DAT, "weber_class_basal_expression.tsv"), sep = "\t")
@@ -489,20 +604,24 @@ p_bas <- ggplot(bas, aes(weber_class, log2(baseMean + 1), fill = weber_class)) +
   scale_fill_manual(values = COL_WEBER, guide = "none") +
   labs(x = "Weber promoter class", y = expression(log[2](baseMean + 1)),
        title = "Basal expression by promoter class",
-       subtitle = sprintf("median baseMean HCP %.0f / ICP %.0f / LCP %.0f (Kruskal-Wallis p = %.2g)",
+       subtitle = sprintf("genes with a DESeq2 estimate; median baseMean HCP %.0f / ICP %.0f / LCP %.0f (Kruskal-Wallis p = %.2g)",
                           med_bas$med[1], med_bas$med[2], med_bas$med[3], kw_bas$p.value)) +
   theme_pub()
 save_supp(p_bas, "figS3_weber_class_basal_expression", 5.5, 4.0)
 
+# (c) are the METHYLATED promoters the silent ones? per class, methylated vs not
 ms <- rbindlist(lapply(CLS, function(cl) {
   cm <- merge(prom_meth[gene_id %in% cls_ids[[cl]], .(gene_id, beta = mean_meth)], de3, by = "gene_id")
   if (!nrow(cm)) return(NULL)
-  cm[, `:=`(weber_class = cl, meth_state = ifelse(beta > 0.2, "methylated", "unmethylated"))]; cm
+  cm[, `:=`(weber_class = cl, meth_state = ifelse(beta > METH_CUT, "methylated", "unmethylated"))]; cm
 }))
 ms[, weber_class := factor(weber_class, levels = CLS)]
 msum <- ms[, .(n = .N, median_baseMean = round(median(baseMean))), by = .(weber_class, meth_state)]
 fwrite(msum, file.path(DAT, "weber_class_meth_state_expression.tsv"), sep = "\t")
 print(msum)
+# STAT TEST: per class, two-sided Mann-Whitney U (methylated vs unmethylated
+# baseMean); effect size = rank-biserial r_rb = 1 - 2U/(n_meth*n_unmeth).
+# the NEGATIVE of the textbook 2U/(n1 n2) - 1 form, matching the paper's positive values.
 mw <- rbindlist(lapply(CLS, function(cl) {
   a <- ms[weber_class == cl & meth_state == "methylated",   baseMean]
   b <- ms[weber_class == cl & meth_state == "unmethylated", baseMean]
@@ -521,12 +640,25 @@ p_ms <- ggplot(ms, aes(meth_state, log2(baseMean + 1), fill = meth_state)) +
   facet_wrap(~ weber_class, nrow = 1) +
   scale_fill_manual(values = c(methylated = "#D55E00", unmethylated = "#0072B2"), guide = "none") +
   labs(x = NULL, y = expression(log[2](baseMean + 1)),
-       title = "Methylated promoters are the lower-expressed ones, in every class",
-       subtitle = "beta>0.2 = methylated; effect is strongest where a class actually has methylated members") +
+       title = sprintf("Methylated promoters are lower expressed at %s", {
+                 lo <- mw[!is.na(p) & p < 0.05 & rank_biserial > 0, weber_class]
+                 if (length(lo)) paste(lo, collapse = " and ") else "no class" }),
+       subtitle = paste0("beta > ", METH_CUT, " = methylated; ",
+                         paste(mw[, sprintf("%s: n = %d/%d, P = %.2g, r = %+.2f", weber_class, n_meth, n_unmeth, p, rank_biserial)],
+                               collapse = "; "))) +
   theme_pub() + theme(strip.background = element_blank(),
                       axis.text.x = element_text(angle = 20, hjust = 1, size = 7))
 save_supp(p_ms, "figS3_weber_class_meth_state_expression", 7.0, 3.6)
 
+# later batch): the HCP-promoter-DMR panels need 05_differential's DMR calls -- the
+# pipeline's one upward read. 07_wgcna reads promoter_weber_classification.tsv and
+# writes hcp_promoter_dmr_genes.tsv + the figS6_hcp_* panels.
+
+# ---- [9] AP-2 domain architecture -----
+# The single D. laeve AP-2 gene (LOC_00012416; assembly symbol TFAP2B, JASPAR bait
+# TFAP2A) dominates the HCP motif signal, so the supplement shows its protein's
+# Pfam domain architecture, in the style of 01_genome_toolkit's figS_uhrf_domains. Domains
+# come from a fresh hmmscan (project-local HMMER 3.4 + pressed Pfam-A, gathering
 local({
   PROTE  <- "/mnt/data/alfredvar/30-Genoma/31-Alternative_Annotation_EviAnn/derLaeGenome_namesDlasi_v2.fasta.functional_note.proteins.fasta"
   HMMSCAN <- "/mnt/data/alfredvar/rlopezt/meth_paper/tools/hmmer/bin/hmmscan"
@@ -535,6 +667,7 @@ local({
   aa  <- readAAStringSet(PROTE)
   aa  <- aa[grepl(paste0("^", AP2, "-mRNA"), names(aa))]
   aa  <- aa[which.max(width(aa))]                      # longest isoform
+  # intermediates live beside the other cached inputs in dataset/
   qfa <- file.path(DS, "ap2_protein.fa"); writeXStringSet(aa, qfa)
   dtb <- file.path(DS, "ap2_hmmscan.domtblout")
   stopifnot(system2(HMMSCAN, c("--cut_ga", "--domtblout", dtb, PFAM, qfa),
@@ -565,6 +698,15 @@ local({
   save_supp(pd, "figS3_ap2_domain", 4.8, 1.7)
 })
 
+# ---- [9b] Weber promoter classes across species (supplementary) --------------
+# developmental regulators everywhere, or only in the slug? A SEQUENCE-only test, so it
+# runs on published assemblies without methylation data: the three molluscs whose
+# assemblies 01_genome_toolkit staged for fig1e (Aplysia, Pomacea, Octopus) plus
+# Drosophila melanogaster as a non-regenerating outgroup, classified with the identical
+# uses the species' own STRING v12 term file (tools/string/, staged once from node12 by
+# tools/string/fetch_species.sh; defq has no network). Aplysia californica is not in
+# STRING v12, so it gets classes only, and STRING species files carry GO but no KEGG, so
+# these panels are GO only. Every input is read by path and must already exist.
 cat("[9b] Weber classes across species + HCP GO\n")
 SPD  <- file.path(BATCH, "dataset", "species")
 MOLL <- file.path(PIPE, "01_genome_toolkit/dataset/mollusc_genomes")
@@ -580,6 +722,7 @@ species <- list(
        gff = file.path(SPD, "GCF_000001215.4_Release_6_plus_ISO1_MT_genomic.gff.gz"), taxid = 7227L))
 for (sp in species) stopifnot(file.size(sp$fna) > 1e7, file.size(sp$gff) > 1e6)   # staged and not truncated
 
+# one species: RefSeq protein-coding genes -> TSS -> Weber region -> sliding classification
 classify_species <- function(sp) {
   g <- fread(cmd = sprintf("zcat '%s' | grep -v '^#'", sp$gff), sep = "\t", header = FALSE, quote = "",
              col.names = c("seqid","src","type","start","end","score","strand","phase","attr"))
@@ -602,6 +745,7 @@ classify_species <- function(sp) {
 sp_cls <- rbindlist(lapply(species, classify_species))
 fwrite(sp_cls, file.path(DAT, "species_promoter_weber_classification.tsv"), sep = "\t")
 
+# class proportions of all six species on one axis (D. laeve + human from [2] and [5])
 SP_LEVELS <- c("Deroceras laeve", "Aplysia californica", "Pomacea canaliculata",
                "Octopus bimaculoides", "Drosophila melanogaster", "Homo sapiens")
 prop <- rbind(
@@ -622,10 +766,11 @@ p_sp <- ggplot(prop, aes(species, pct, fill = weber_class)) +
                       plot.title = element_text(size = rel(1)))
 save_supp(p_sp, "figS3_weber_classes_across_species", 5.2, 3.4)
 
+# GO per Weber class and species: GFF GeneID -> STRING protein (aliases file) -> STRING GO terms
 string_terms_for <- function(taxid) {
   al <- fread(cmd = sprintf("zcat '%s' | grep -v '^#'", file.path(STRD, sprintf("%d.protein.aliases.v12.0.txt.gz", taxid))),
               sep = "\t", header = FALSE, quote = "", col.names = c("string_id", "alias", "source"))
-  al <- unique(al[grepl("GeneID|EntrezGene", source)][, .(string_id, geneid = alias)])
+  al <- unique(al[grepl("GeneID|EntrezGene", source, ignore.case = TRUE)][, .(string_id, geneid = alias)])
   tm <- fread(cmd = sprintf("zcat '%s' | grep -v '^#'", file.path(STRD, sprintf("%d.protein.enrichment.terms.v12.0.txt.gz", taxid))),
               sep = "\t", header = FALSE, quote = "", col.names = c("string_id", "category", "term", "description"))
   tm <- tm[category %in% GO_CATS[c("BP", "MF", "CC")]]
@@ -635,6 +780,8 @@ run_enr_sp <- function(sig, uni_genes, tm, cat_label) {
   sub <- tm[category == cat_label]
   uni <- intersect(unique(sub$geneid), uni_genes); hit <- intersect(sig, uni)
   if (length(hit) < 5) return(data.table())
+  # STAT TEST: hypergeometric ORA (clusterProfiler enricher), BH-adjusted; universe = that
+  # species' classified protein-coding genes carrying an annotation in the category tested.
   res <- suppressWarnings(enricher(gene = hit, universe = uni, TERM2GENE = sub[, .(term, geneid)],
            TERM2NAME = unique(sub[, .(term, description)]), pAdjustMethod = "BH",
            pvalueCutoff = 1, qvalueCutoff = 1, minGSSize = 5, maxGSSize = 500))
@@ -645,8 +792,9 @@ sp_go <- rbindlist(lapply(Filter(function(sp) !is.na(sp$taxid), species), functi
   tm <- string_terms_for(sp$taxid)
   cl <- sp_cls[species == sp$name & !is.na(geneid)]
   uni <- unique(cl$geneid)
-  cat(sprintf("  %s: %d classified genes, %d with a STRING GO annotation\n", sp$name, length(uni),
-              length(intersect(uni, unique(tm$geneid)))))
+  n_map <- length(intersect(uni, unique(tm$geneid)))
+  cat(sprintf("  %s: %d classified genes, %d with a STRING GO annotation\n", sp$name, length(uni), n_map))
+  stopifnot(n_map > 100)   # a silent mapping failure must not read as "no enrichment"
   rbindlist(lapply(c("HCP", "ICP", "LCP"), function(wc) {
     sig <- cl[weber_class == wc, geneid]
     rbindlist(lapply(c("BP", "MF", "CC"), function(o) {
@@ -660,9 +808,11 @@ fwrite(sp_go, file.path(DAT, "species_weber_class_go_enrichment.tsv"), sep = "\t
 n_sig <- sp_go[weber_class == "HCP" & p.adjust < 0.05 & Count >= 5, .N, by = species]
 cat("  HCP GO terms at FDR<0.05 (Count>=5) per species:\n"); print(n_sig)
 
+# HCP panel: the leading terms per species (by fold; FDR<0.05, Count>=5), D. laeve and
+# human beside the three STRING species so the comparison is on one axis
 hcp_top <- function(d, sp, n = 8L) {
   if (!nrow(d)) return(data.table())
-  d <- d[weber_class == "HCP" & p.adjust < 0.05 & Count >= 5 & is.finite(FoldEnrichment)]
+  d <- d[weber_class == "HCP" & ontology %in% c("BP", "MF", "CC") & p.adjust < 0.05 & Count >= 5 & is.finite(FoldEnrichment)]   # GO only: the species files carry no KEGG
   if (!nrow(d)) return(data.table())
   d <- d[order(-FoldEnrichment, p.adjust)][seq_len(min(n, .N))]
   d[, .(species = sp, term = Description, ontology, FoldEnrichment, p.adjust, Count)]
@@ -673,7 +823,8 @@ fwrite(hcp_all, file.path(DAT, "species_hcp_go_top_terms.tsv"), sep = "\t")
 if (nrow(hcp_all)) {
   hcp_all[, species := factor(species, levels = SP_LEVELS)]
   hcp_all[, lab := paste0(vapply(term, function(x) paste(strwrap(x, 38), collapse = "\n"), character(1)), " (", ontology, ")")]
-  hcp_all[, lab := factor(make.unique(lab), levels = rev(make.unique(lab)))]   # duplicated names across species: unique labels
+  hcp_all[, lab := {  # the same term in two species needs distinct factor levels: pad with spaces, invisible in the plot
+    u <- lab; d <- ave(seq_along(u), u, FUN = seq_along); u[d > 1] <- paste0(u[d > 1], strrep(" ", d[d > 1] - 1)); factor(u, levels = rev(u)) }]
   p_hgo <- go_dot(hcp_all) + facet_wrap(~ species, scales = "free_y", ncol = 1) +
     labs(title = "HCP promoter genes: leading GO terms per species") +
     theme(strip.background = element_blank(), strip.text = element_text(face = "italic", size = 8),
@@ -681,5 +832,6 @@ if (nrow(hcp_all)) {
   save_supp(p_hgo, "figS3_species_hcp_go", 6.2, 1.55 * length(unique(hcp_all$species)) + 1.0)
 }
 
+# ---- [10] Reproducibility: sessionInfo record -------------------------------
 writeLines(capture.output(sessionInfo()), file.path(BATCH, "sessionInfo_03_promoters.txt"))
 cat("[03_promoters] done\n")

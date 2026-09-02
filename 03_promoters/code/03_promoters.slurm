@@ -9,8 +9,10 @@
 #SBATCH --time=12:00:00     # backfillable (added 2026-08-17)
 #SBATCH --output=%x_%j.log
 
+# silently depended on the submitting user's ~/.bashrc R_LIBS export.
 export R_LIBS="/mnt/data/alfredvar/rlopezt/rlib:/mnt/data/alfredvar/jmiranda/80-scripts/88-R-packages"
 set -euo pipefail
+# 03_promoters does no heavy I/O (it reads RDS + classifies), so scratch is optional here.
 export SCRATCH_JOB="/scratch/groups/alfredvar/$USER/job_$SLURM_JOB_ID"
 if mkdir -p "$SCRATCH_JOB/tmp" 2>/dev/null; then export TMPDIR="$SCRATCH_JOB/tmp"
 else SCRATCH_JOB=""; export TMPDIR="${TMPDIR:-/tmp}"; echo "no scratch on $(hostname); TMPDIR=$TMPDIR"; fi

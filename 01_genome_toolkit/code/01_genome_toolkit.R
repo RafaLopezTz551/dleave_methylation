@@ -1,5 +1,4 @@
 #!/usr/bin/env Rscript
-
 set.seed(20260426)  # reproducibility
 
 suppressPackageStartupMessages({
@@ -11,7 +10,17 @@ suppressPackageStartupMessages({
   library(DESeq2)          # normalized counts + gene DE (toolkit heatmap, volcano)
 })
 
+# Pinned package versions (provenance; validated under R 4.4.1 / Bioc 3.20, Fenix):
+#   Biostrings 2.74.1     rtracklayer 1.66.0    GenomicRanges 1.58.0   GenomeInfoDb 1.42.3
+#   data.table 1.18.2.1   ggplot2 4.0.2         DESeq2 1.46.0          apeglm 1.28.0
+#   EnhancedVolcano 1.24.0  patchwork 1.3.2
+# Machine-checkable record: sessionInfo_01_genome_toolkit.txt, written at the end of the run.
+
+# ---- [0] Paths, palette, theme, figure savers --------------------------------
+# ID-list subset of the canonical GCA_051403575 assembly, coordinates unchanged.
 GENOME <- "/mnt/data/alfredvar/rlopezt/genoma/dlaeve/genoma_chr_mt/Dlaeve_chr_mt.fasta"
+# Whole canonical assembly, used ONLY in section 8 (cross-species CpG O/E), where
+# every species must be measured on the same kind of sequence (whole assembly).
 GENOME_FULL <- "/mnt/data/alfredvar/30-Genoma/Deroceras_laeve_genome_GCA_051403575.fasta"
 GFF    <- "/mnt/data/alfredvar/30-Genoma/31-Alternative_Annotation_EviAnn/derLaeGenome_namesDlasi_v2.fasta.functional_note.pseudo_label.gff"
 TE     <- "/mnt/data/alfredvar/30-Genoma/32-Repeats/age_of_transposons/collapsed_te_age_data.tsv"
@@ -24,13 +33,15 @@ FIG    <- file.path(BATCH, "figures/main")
 SUPP   <- file.path(BATCH, "figures/supplementary")
 for (d in c(OBJ, DAT, FIG, SUPP)) dir.create(d, showWarnings = FALSE, recursive = TRUE)
 
-keep_chr <- c(paste0("chr", 1:31), "HiC_scaffold_1563")  # chr1-31 + mito scaffold (2026-08-17)
+keep_chr <- c(paste0("chr", 1:31), "HiC_scaffold_1563")
 
+# Project palette (colour-blind safe, consistent across the paper)
 COL_REGION <- c(Promoter = "#56B4E9", `Gene body` = "#117733",
                 Exon = "#009E73", Intron = "#E6AB02", TE = "#B15928",
                 Intergenic = "#CC79A7")
 COL_COND   <- c(Control = "#0072B2", Amputated = "#D55E00")
 
+# Minimal Nature/Science-style theme
 theme_pub <- function() {
   theme_classic(base_size = 9, base_family = "sans") +
     theme(plot.title = element_text(size = 10, face = "bold"),
@@ -39,12 +50,14 @@ theme_pub <- function() {
           panel.grid.major.y = element_line(linewidth = 0.25, colour = "grey90"))
 }
 
+# Save a figure as both PDF (manuscript) and PNG (quick view)
 save_fig <- function(p, name, w, h) {
   ggsave(file.path(FIG, paste0(name, ".pdf")), p, width = w, height = h)
   ggsave(file.path(FIG, paste0(name, ".png")), p, width = w, height = h, dpi = 150)
   ggsave(file.path(FIG, paste0(name, ".svg")), p, width = w, height = h)   # vector (svg)
   cat(sprintf("  saved %s (%g x %g in)\n", name, w, h))
 }
+# Same, but into figures/supplementary/
 save_supp <- function(p, name, w, h) {
   ggsave(file.path(SUPP, paste0(name, ".pdf")), p, width = w, height = h)
   ggsave(file.path(SUPP, paste0(name, ".png")), p, width = w, height = h, dpi = 150)
@@ -52,30 +65,37 @@ save_supp <- function(p, name, w, h) {
   cat(sprintf("  saved (supp) %s (%g x %g in)\n", name, w, h))
 }
 
+# ---- [1] Load genome + GFF (built once into objects/, reused on rerun) -------
+# Writes genome_chrmt.rds + gff_chrmt.rds, the foundational objects later batches read.
 cat("[1] loading genome + GFF (chr1..chr31 + mito scaffold)\n")
 genome_rds <- file.path(OBJ, "genome_chrmt.rds")
 gff_rds    <- file.path(OBJ, "gff_chrmt.rds")
 
-if (file.exists(genome_rds)) {
+stale_cache <- function(cache, ...) !file.exists(cache) || any(file.mtime(c(...)) > file.mtime(cache))
+if (!stale_cache(genome_rds, GENOME)) {
   genome <- readRDS(genome_rds)
 } else {
   genome <- readDNAStringSet(GENOME)
   names(genome) <- sub("\\s.*", "", names(genome))   # ">chr1 ..." -> "chr1"
   genome <- genome[names(genome) %in% keep_chr]
-  genome <- genome[keep_chr]                          # fixed chr1..chr31 order
+  genome <- genome[keep_chr]
   saveRDS(genome, genome_rds)
 }
 
-if (file.exists(gff_rds)) {
+if (!stale_cache(gff_rds, GFF)) {
   gff <- readRDS(gff_rds)
 } else {
   gff <- import(GFF)
   gff <- gff[as.character(seqnames(gff)) %in% keep_chr]
+  # 32-level universe (a pre-normalisation cache once broke 03_promoters's keepSeqlevels).
   gff <- GenomeInfoDb::keepSeqlevels(gff, intersect(keep_chr, GenomeInfoDb::seqlevels(gff)),
                                      pruning.mode = "coarse")
   GenomeInfoDb::seqlevels(gff) <- keep_chr
   saveRDS(gff, gff_rds)
 }
+# Re-normalise on BOTH paths (fresh or cached): EviAnn has ZERO features on the mito
+# scaffold, so that seqlevel is absent from the imported GFF — keep the intersection,
+# then set the full 32-level keep_chr so the GFF seqlevels match the genome exactly.
 gff <- GenomeInfoDb::keepSeqlevels(gff, intersect(keep_chr, GenomeInfoDb::seqlevels(gff)),
                                    pruning.mode = "coarse")
 GenomeInfoDb::seqlevels(gff) <- keep_chr
@@ -83,11 +103,15 @@ chr_len <- setNames(width(genome), names(genome))
 cat(sprintf("  genome: %d chromosomes, %.1f Mb\n",
             length(genome), sum(as.numeric(chr_len)) / 1e6))
 
+# ---- [2] fig1a: dinucleotide composition (observed vs expected) --------------
+# Computes all 16 dinucleotide frequencies over the chr+mt genome; writes
+# dinucleotide_frequencies.tsv and fig1a (CG bar highlighted, diamonds = expected).
 cat("[2] fig1a dinucleotide frequencies\n")
 di_counts <- colSums(dinucleotideFrequency(genome))     # all 16 dinucleotides
 observed  <- di_counts / sum(di_counts)
 mono      <- colSums(alphabetFrequency(genome, baseOnly = TRUE))[c("A","C","G","T")]
 mono_freq <- mono / sum(mono)
+# expected dinuc freq = product of the two single-base frequencies
 expected  <- sapply(names(observed), function(d) {
   b <- strsplit(d, "")[[1]]; mono_freq[b[1]] * mono_freq[b[2]]
 })
@@ -111,21 +135,29 @@ pa <- ggplot(dn, aes(dinucleotide, 100 * observed, fill = is_cg)) +
 save_fig(pa, "fig1a_dinucleotide_freq", 3.4, 2.3)
 cat(sprintf("  CpG O/E (genome) = %.3f\n", dn[dinucleotide == "CG", ratio_obs_exp]))
 
+# ---- [3] Region x chromosome CpG density / O/E / GC (feeds fig1b/c/d) --------
+# Region sets from the GFF (promoter = 2 kb upstream ending AT the TSS; intergenic =
+# genome minus gene body + promoter) plus the approved TE table; one row per
+# region x chromosome; writes region_chr_cpg_stats.tsv.
 cat("[3] per-region CpG density / O/E / GC\n")
 genes <- gff[gff$type == "gene"]
 exons <- gff[gff$type == "exon"]
 seqlengths(genes) <- chr_len[seqlevels(genes)]
 
 prom   <- trim(promoters(genes, upstream = 2000, downstream = 0))  # 2 kb upstream
+# strand-neutralise before reduce() so two genes overlapping on OPPOSITE strands merge
+# (a stranded reduce keeps both, double-counting shared bases in the length/CpG stats).
 gu <- genes; strand(gu) <- "*"; eu <- exons; strand(eu) <- "*"
 body   <- reduce(gu)                                              # gene bodies
 exon_r <- reduce(eu)
 intron <- GenomicRanges::setdiff(body, exon_r)                     # body minus exons (both unstranded)
+# Intergenic = genome minus (gene body + promoter)
 genic  <- reduce(c(granges(body), granges(prom)))
 strand(genic) <- "*"; genic <- reduce(genic)
 seqlengths(genic) <- chr_len[seqlevels(genic)]
 inter  <- gaps(genic); inter <- inter[strand(inter) == "*"]
 
+# Transposable elements (approved TE table; chr1..31 only, like everything else)
 te <- fread(TE)
 te <- te[chrom %in% keep_chr]
 te_gr <- GRanges(te$chrom, IRanges(te$start, te$end))
@@ -133,6 +165,8 @@ te_gr <- GRanges(te$chrom, IRanges(te$start, te$end))
 regions <- list(Promoter = prom, `Gene body` = body, Exon = exon_r,
                 Intron = intron, TE = te_gr, Intergenic = inter)
 
+# For a set of ranges on one chromosome, sum CpG, C, G over the actual sequence.
+# reduce() merges overlapping ranges first so shared bases aren't counted twice.
 region_chr_stat <- function(reg, chr) {
   r <- reg[as.character(seqnames(reg)) == chr]
   if (length(r) == 0) return(NULL)
@@ -148,6 +182,9 @@ region_chr_stat <- function(reg, chr) {
              gc_pct     = 100 * (cc + gg) / len)
 }
 
+# mito scaffold would enter ONLY the Intergenic series, where its 28.7% GC (chromosomal
+# median 44.2%) is a 15-point outlier inflating that series' SD 0.60 -> 2.82. Organelle
+# DNA is not "intergenic" in the nuclear sense (same reason the LMR segmentation drops it).
 chr_nuc <- paste0("chr", 1:31)
 stats <- rbindlist(lapply(names(regions), function(nm) {
   rr <- rbindlist(lapply(chr_nuc, function(chr) region_chr_stat(regions[[nm]], chr)))
@@ -158,10 +195,13 @@ stats <- stats[is.finite(cpg_oe)]   # drop rare non-finite O/E rows (a region/ch
 stats[, region := factor(region, levels = names(regions))]
 fwrite(stats, file.path(DAT, "region_chr_cpg_stats.tsv"), sep = "\t")
 
+# Genome-wide reference values (dotted lines)
 g_cpg_per_kb <- 1000 * sum(as.numeric(di_counts["CG"])) / sum(as.numeric(chr_len))
 g_gc_pct     <- 100 * (mono["C"] + mono["G"]) / sum(mono)
 g_cpg_oe     <- dn[dinucleotide == "CG", ratio_obs_exp]
 
+# ---- [4] fig1b/c/d: per-region distributions ---------------------------------
+# Density curves of §3's per-chromosome stats; dotted vline = genome-wide value.
 cat("[4] fig1b/c/d region distributions\n")
 pb <- ggplot(stats, aes(cpg_per_kb, fill = region, colour = region)) +
   geom_density(alpha = 0.3, linewidth = 0.6) +
@@ -170,6 +210,9 @@ pb <- ggplot(stats, aes(cpg_per_kb, fill = region, colour = region)) +
   labs(x = "CpG per kb", y = "Density", title = "CpG density by region", subtitle = "one point per chromosome (n = 31)") + theme_pub()
 save_fig(pb, "fig1b_cpg_density_distribution", 3.4, 2.2)
 
+# fig1c axis decision: all regions sit at CpG O/E ~0.45-0.70, so the x=1 "parity"
+# line is deliberately NOT drawn (it left ~40% of the panel empty); the dotted
+# genome-wide O/E line (g_cpg_oe) is the anchor instead.
 pc <- ggplot(stats, aes(cpg_oe, fill = region, colour = region)) +
   geom_density(alpha = 0.3, linewidth = 0.6) +
   geom_vline(xintercept = g_cpg_oe, linetype = "dotted") +
@@ -184,6 +227,15 @@ pd <- ggplot(stats, aes(gc_pct, fill = region, colour = region)) +
   labs(x = "GC content (%)", y = "Density", title = "GC content by region", subtitle = "one point per chromosome (n = 31)") + theme_pub()
 save_fig(pd, "fig1d_gc_distribution", 3.4, 2.2)
 
+# ---- [5] fig2a: methylation toolkit presence (eggNOG orthology) --------------
+# 20 canonical animal toolkit genes/families; writes toolkit_presence.tsv + fig2a.
+# MBD2/3, UHRF1/2, EHMT1/2, EZH1/2, SUV39H1/2, GADD45A/B/G are vertebrate/mammalian
+# duplications, so an invertebrate carries ONE ancestral member named by eggNOG after
+# whichever paralog it best matches. Per-paralog scoring called G9A/EZH2/SUV39H1
+# "absent" while the same loci were present as EHMT1/EZH1/SUV39H2 (a naming artefact,
+# not a finding). Each family = ONE row matched against every paralog name (tk_syn);
+# the bar carries the name eggNOG assigned. MBD1 and MeCP2 stay as rows because they
+# are vertebrate-specific and their expected absence should be visible.
 cat("[5] fig2a toolkit presence\n")
 toolkit <- data.table(
   gene_symbol = c("DNMT1","DNMT3 (A/B/L)","DNMT2",
@@ -198,8 +250,12 @@ toolkit <- data.table(
                "Demethylation pathway","Demethylation pathway",
                "Demethylation pathway","Demethylation pathway"))
 
+# assigned that name by eggNOG-mapper (the ortholog database), and the CONFIDENCE
+# of the ortholog call is the seed-ortholog bit score. This replaces the older
+# GFF-"Similar to" text match with an actual orthology assignment.
 EMAPPER <- "/mnt/data/alfredvar/30-Genoma/31-Alternative_Annotation_EviAnn/eggnog_mapper/dlasi_proteome.emapper.annotations"
 gene_id <- sub(";.*", "", as.character(mcols(genes)$ID))          # chr1-31 gene loci
+# GFF "Similar to SYM:" note per gene — still used downstream (§7 DE-volcano labels)
 gene_note <- sapply(mcols(genes)$Note, function(x)
   if (length(x) == 0) NA_character_ else as.character(x)[1])
 egg <- fread(EMAPPER, sep = "\t", quote = "", header = TRUE, skip = "#query",
@@ -208,6 +264,8 @@ setnames(egg, 1, "query"); egg <- egg[!startsWith(query, "##")]
 egg[, locus := sub("-mRNA-.*$", "", query)]
 egg <- egg[locus %in% gene_id & !is.na(Preferred_name)]          # chr1-31 only
 egg[, PN := toupper(Preferred_name)]
+# Every name a family row accepts (eggNOG Preferred_name, case-insensitive). DNMT2 is
+# annotated under its HGNC synonym TRDMT1; G9A is HGNC EHMT2 and GLP is EHMT1.
 tk_syn <- list(DNMT2 = "TRDMT1",
                `DNMT3 (A/B/L)`  = c("DNMT3A", "DNMT3B", "DNMT3L"),
                `TET (1/2/3)`    = c("TET1", "TET2", "TET3"),
@@ -230,6 +288,9 @@ toolkit[, bit        := as.numeric(sapply(mm, `[[`, "bit"))]
 toolkit[, ortholog   := sapply(mm, `[[`, "ortholog")]
 toolkit[, seed       := sapply(mm, `[[`, "seed")]
 toolkit[, n_paralogs := as.integer(sapply(mm, `[[`, "n"))]
+# PRESENT = best eggNOG hit clears the mapper's default seed-ortholog acceptance
+# threshold (bit >= 60); "absent" = NOT DETECTED above threshold, weaker than "lost"
+# DNMT3 absence is additionally confirmed by tBLASTn + HMMER in §5b.
 BIT_MIN <- 60
 toolkit[, present    := !is.na(gene_id) & bit >= BIT_MIN]
 fwrite(toolkit, file.path(DAT, "toolkit_presence.tsv"), sep = "\t")
@@ -238,6 +299,7 @@ cat(sprintf("  present %d / %d by eggNOG ortholog (DNMT1=%s, DNMT3A=%s)\n",
             toolkit[gene_symbol == "DNMT1", present],
             toolkit[gene_symbol == "DNMT3 (A/B/L)", present]))
 
+# Category levels: detailed order for the §6 heatmap, broad name for colour.
 cat_levels <- c("Writer (maintenance)","Writer (de novo)","Writer (tRNA)",
                 "Eraser (TET)","Reader (MBD)","Support","Cofactor",
                 "Demethylation pathway")
@@ -245,6 +307,9 @@ broad_levels <- c("Writer","Eraser","Reader","Support","Cofactor",
                   "Demethylation pathway")
 broad_cat <- function(x) sub(" *\\(.*", "", x)   # "Writer (de novo)" -> "Writer"
 
+# fig2a: ORTHOLOG CONFIDENCE bar chart. Bar length = eggNOG bit score, labelled
+# with the ortholog name eggNOG assigned (e.g. the EHMT family row reads "EHMT1");
+# families with no ortholog above the cutoff (e.g. DNMT3 (A/B/L)) read "absent".
 tk <- copy(toolkit)
 tk[, cat_broad := factor(broad_cat(as.character(category)), levels = broad_levels)]
 tk[, label := ifelse(present, ortholog, gene_symbol)]            # ortholog name when present
@@ -266,8 +331,17 @@ pe <- ggplot(tk, aes(bit, label, fill = cat_broad)) +
         strip.placement = "outside", strip.background = element_blank(),
         strip.text.y.left = element_text(angle = 0, hjust = 1, size = 7, colour = "grey25"),
         plot.title = element_text(size = rel(1)), plot.title.position = "plot")
+        # "panel" anchoring pushes the title right of the long y-label block
 save_fig(pe, "fig2a_methylation_toolkit_presence", 4.4, 5.1)
 
+# ---- [5b] figS_dnmt3_absence: tBLASTn + Pfam domain architecture -------------
+# Hardens §5's "DNMT3 absent" (annotation-derived, not proven loss) two ways:
+#   (A) tBLASTn of DNMT3 proteins vs the 6-frame genome (annotation-INDEPENDENT),
+#       with DNMT1/DNMT2/TET3 as positive controls proving the search sensitivity.
+#   (B) HMMER/Pfam: enumerate every catalytic C5-MTase (PF00145) in the proteome and
+#       search the DNMT3-specific ADD domain (PF17980) genome-wide (expect 0).
+# (shared with the unrelated PWWP2A gene); a naive best-hit reads "DNMT3 present".
+# only small result tables come back. Writes dnmt3_*.tsv + figS_dnmt3_absence.
 cat("[5b] figS_dnmt3_absence: tBLASTn + Pfam domain architecture\n")
 suppressPackageStartupMessages(library(patchwork))
 PROJ      <- "/mnt/data/alfredvar/rlopezt/meth_paper"
@@ -282,6 +356,7 @@ scr <- if (nzchar(job)) file.path("/scratch/groups/alfredvar", Sys.getenv("USER"
                                   paste0("job_", job), "dnmt3") else file.path(tempdir(), "dnmt3")
 dir.create(scr, recursive = TRUE, showWarnings = FALSE)
 
+# (A) tBLASTn: write the chr1..31+mito genome, build the nucleotide DB, search all queries.
 gfa <- file.path(scr, "genome_chrmt.fa"); writeXStringSet(genome, gfa)
 system2(file.path(BLAST_BIN, "makeblastdb"),
         c("-in", gfa, "-dbtype", "nucl", "-out", file.path(scr, "db")), stdout = FALSE)
@@ -289,6 +364,7 @@ bt <- file.path(scr, "tblastn.tsv")
 system2(file.path(BLAST_BIN, "tblastn"),
         c("-query", DNMT_Q, "-db", file.path(scr, "db"), "-evalue", "10",
           "-num_threads", "8", "-max_target_seqs", "20", "-seg", "yes",
+          # must be one shell token or tblastn errors out and writes nothing.
           "-outfmt", shQuote("6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qcovs"),
           "-out", bt))
 bl <- fread(bt, header = FALSE,
@@ -296,14 +372,18 @@ bl <- fread(bt, header = FALSE,
                           "qstart","qend","sstart","send","evalue","bitscore","qcovs"))
 best <- bl[order(evalue)][, .SD[1], by = qseqid]      # best hit per query
 
+# Which gene does the best DNMT3 hit fall in? (expect PWWP2A, NOT a methyltransferase)
 d3 <- bl[grepl("DNMT3", qseqid) & evalue < 1e-3][order(evalue)][1]
 genes <- gff[gff$type == "gene"]
 hit_gr   <- GRanges(d3$sseqid, IRanges(min(d3$sstart, d3$send), max(d3$sstart, d3$send)))
 hit_gene <- genes[subjectHits(findOverlaps(hit_gr, genes))[1]]
-sym_of <- function(g) { s <- sub(".*Similar to ([^:]+):.*", "\\1", as.character(g$Note)[1])
+sym_of_gene <- function(g) { s <- sub(".*Similar to ([^:]+):.*", "\\1", as.character(g$Note)[1])
                         if (is.na(s) || !nzchar(s)) as.character(g$ID)[1] else s }
-hit_loc <- as.character(hit_gene$ID)[1]; hit_sym <- sym_of(hit_gene)
+hit_loc <- as.character(hit_gene$ID)[1]; hit_sym <- sym_of_gene(hit_gene)
 
+# (B) HMMER/Pfam. Fixed leading columns of the tables are parsed in pure R (the
+# trailing description column contains spaces). hmmfetch needs an SSI index; tools/pfam
+# is read-only in practice, so it is built only if BOTH possible index names are absent.
 if (!file.exists(paste0(PFAM, ".ssi")) && !file.exists(paste0(PFAM, ".h3m.ssi")))
   system2(file.path(HMMER_BIN, "hmmfetch"), c("--index", PFAM), stdout = FALSE)
 qcat <- file.path(scr, "q_cat.hmm"); qadd <- file.path(scr, "q_add.hmm")
@@ -317,6 +397,7 @@ tbl_targets <- function(f) { l <- grep("^#", readLines(f), invert = TRUE, value 
 cat_ids <- unique(sub("-mRNA.*", "", tbl_targets(cat_tbl)))   # genes with a catalytic domain
 n_add   <- length(tbl_targets(add_tbl))                       # DNMT3 ADD hits (expect 0)
 
+# Domain cartoon set: the catalytic MTases + the PWWP2A hit + human DNMT3A reference.
 prot <- readAAStringSet(PROTE); names(prot) <- sub("\\s.*", "", names(prot))
 pick <- unique(c(cat_ids, hit_loc))
 sel  <- prot[names(prot) %in% paste0(pick, "-mRNA-1")]   # assumes isoform -mRNA-1 exists; a gene lacking it drops from the cartoon silently
@@ -331,12 +412,14 @@ dom <- data.table(protein = vapply(pr, `[`, "", 4), domain = vapply(pr, `[`, "",
                   plen  = as.integer(vapply(pr, `[`, "", 6)))
 dom <- dom[grepl("-mRNA-1$|Human_DNMT3A", protein)]
 
+# friendly labels: symbol from the GFF Note, PWWP2A hit flagged, human ref
 lab_of <- function(p) {
   if (p == "Human_DNMT3A") return("Human DNMT3A (reference)")
-  loc <- sub("-mRNA.*", "", p); s <- sym_of(genes[genes$ID == loc])
+  loc <- sub("-mRNA.*", "", p); s <- sym_of_gene(genes[genes$ID == loc])
   if (loc == hit_loc) sprintf("D. laeve %s\n(the BLAST hit)", s) else sprintf("D. laeve %s", s)
 }
 dom[, plab := vapply(protein, lab_of, "")]
+# order the cartoon rows: human DNMT3A reference on top, slug proteins below
 dom[, plab := factor(plab, levels = rev(c("Human DNMT3A (reference)",
                      sort(setdiff(unique(plab), "Human DNMT3A (reference)")))))]
 
@@ -345,15 +428,17 @@ fwrite(dom,  file.path(DAT, "dnmt3_domain_architecture.tsv"), sep = "\t")
 cat(sprintf("  catalytic MTases: %s | ADD_DNMT3 hits: %d | best DNMT3 hit -> %s (%s)\n",
             paste(cat_ids, collapse = ", "), n_add, hit_loc, hit_sym))
 
+# ---- panel A: tBLASTn best hit per query vs the genome ----
 COL_PA <- c("control (known present)" = "#0072B2", "DNMT3 query" = "#D55E00")
 a <- best[, .(query = qseqid, evalue, bitscore)]
 a[, grp := ifelse(grepl("DNMT3", query), "DNMT3 query", "control (known present)")]
 a[, neglogE := -log10(pmax(evalue, 1e-200))]
+# annotate each row with the gene its best hit lands in
 best_gr <- GRanges(best$sseqid, IRanges(pmin(best$sstart, best$send), pmax(best$sstart, best$send)))
 hg <- findOverlaps(best_gr, genes)
 a[, target := "no significant hit"]
 a[queryHits(hg), target := sprintf("%s: %s", best$sseqid[queryHits(hg)],
-                                   vapply(subjectHits(hg), function(i) sym_of(genes[i]), ""))]
+                                   vapply(subjectHits(hg), function(i) sym_of_gene(genes[i]), ""))]
 a[evalue > 1e-3, target := "no significant hit"]
 lbl <- c(DNMT1_human="DNMT1 (human)", DNMT2_human="DNMT2 (human)", TET3_human="TET3 (human)",
          DNMT3A_human="DNMT3A (human)", DNMT3B_human="DNMT3B (human)",
@@ -371,6 +456,7 @@ pA <- ggplot(a, aes(neglogE, lab, colour = grp)) +
        title = "A  DNMT3 queries hit only PWWP2A, not a methyltransferase") +
   theme_pub() + theme(legend.position = "top", legend.justification = "left")
 
+# ---- panel B: domain architecture (DNMT3 = PWWP + ADD + catalytic) ----
 bb <- unique(dom[, .(plab, plen)])
 dom[, dclass := fifelse(domain == "DNA_methylase", "catalytic (C5-MTase)",
               fifelse(domain %in% c("ADD_DNMT3","DNMT3_ADD_GATA1-like"), "ADD (DNMT3-specific)",
@@ -383,6 +469,7 @@ pB <- ggplot() +
   geom_rect(data = dom, aes(xmin = start, xmax = end, ymin = as.numeric(plab) - 0.3,
             ymax = as.numeric(plab) + 0.3, fill = dclass), colour = "grey30", linewidth = 0.2) +
   scale_fill_manual(values = COL_PB, name = NULL) +
+  # main.tex caption, not burned into the plot.
   labs(x = "amino-acid position", y = NULL,
        title = "B  No D. laeve protein has the DNMT3 architecture") +
   theme_pub() + theme(legend.position = "top", legend.justification = "left")
@@ -391,6 +478,10 @@ save_supp(pA / pB + patchwork::plot_layout(heights = c(1, 0.95)), "figS_dnmt3_ab
 unlink(scr, recursive = TRUE)     # drop the heavy BLAST DB from scratch
 rm(bl, best, prot, sel, ref, dom, a); gc(verbose = FALSE)
 
+# ---- [6] figS_toolkit_mrna_tail: toolkit mRNA, tail control vs amputated -----
+# fig2a is the main toolkit panel.) Also builds the dds reused by §7 for gene DE.
+# Sample map rebuilt from filenames (NO external metadata):
+# tail control = C1S1..C4S4 ; tail amputated = T2S6,T3S7,T4S8 (T1S5 excluded).
 cat("[6] fig2c toolkit mRNA, tail control vs amputated\n")
 samples <- data.table(
   sample    = c("C1S1","C2S2","C3S3","C4S4","T2S6","T3S7","T4S8"),
@@ -398,6 +489,7 @@ samples <- data.table(
 samples[, file := file.path(HTSEQ, paste0(sample, "_htseq_gene_counts.txt"))]
 stopifnot(all(file.exists(samples$file)))
 
+# Read each HTSeq file (gene_id, count); drop the trailing "__" summary rows.
 counts_list <- lapply(samples$file, function(f) {
   x <- fread(f, header = FALSE, col.names = c("gene_id", "count"))
   x[!startsWith(gene_id, "__")]
@@ -407,6 +499,8 @@ count_mat <- sapply(counts_list, function(x) x$count)
 rownames(count_mat) <- genes_in_counts
 colnames(count_mat) <- samples$sample
 
+# Keep only genes annotated on the keep_chr universe (gene_id from §5) — the
+# transcriptomic side of the chromosome filter.
 count_mat <- count_mat[rownames(count_mat) %in% gene_id, , drop = FALSE]
 count_mat <- count_mat[rowSums(count_mat >= 5) >= 2, , drop = FALSE]  # expressed
 cat(sprintf("  %d genes x %d tail libraries after filtering\n",
@@ -432,7 +526,7 @@ mrna[, category  := factor(category, levels = cat_levels)]
 mrna[, cat_broad := factor(broad_cat(as.character(category)), levels = broad_levels)]
 setorder(mrna, category, gene_symbol)
 mrna[, gene_symbol := factor(gene_symbol, levels = rev(gene_symbol))]
-long <- melt(mrna, id.vars = c("gene_symbol","cat_broad"),
+long <- data.table::melt(mrna, id.vars = c("gene_symbol","cat_broad"),   # namespaced (masked-generic rule)
              measure.vars = c("Control","Amputated"),
              variable.name = "condition", value.name = "expr")
 
@@ -447,16 +541,25 @@ pf <- ggplot(long, aes(condition, gene_symbol, fill = expr)) +
         panel.grid = element_blank())
 save_supp(pf, "figS_toolkit_mrna_tail", 5.0, 4.5)   # supplementary (fig2a is the main toolkit panel)
 
+# ---- [7] Supplementary gene DE (tail): DESeq2/apeglm volcano + top-20 --------
+# HTSeq gene counts -> DESeq2/apeglm -> gene_de_tail.tsv (the project's canonical DE
+# table), figS_gene_de_volcano, figS_top_de_genes.
 cat("[7] supplementary: gene DE\n")
 suppressPackageStartupMessages({ library(EnhancedVolcano) })
 
+# Gene-symbol map from the GFF Note (for readable volcano / table labels)
 has_sym <- grepl("^Similar to [^:]+:", gene_note)
 sym_of  <- ifelse(has_sym, sub("^Similar to ([^:]+):.*$", "\\1", gene_note), NA_character_)
 names(sym_of) <- gene_id
 lab_for <- function(ids) ifelse(is.na(sym_of[ids]), ids, sym_of[ids])   # tables: symbol or LOC id
+# "Non annotated gene" placeholder is retired.
 disp_name <- function(ids) unname(ifelse(is.na(sym_of[ids]), ids, sym_of[ids]))
 
+# ---- [7a] Gene-level DE (tail HTSeq, 4 control vs 3 amputated) ---------------
+# Reuses the dds built in §6 (design ~ condition).
 dds <- DESeq(dds)
+# STAT TEST: DESeq2 differential expression = Wald test on the per-gene negative-binomial
+# GLM (p-values/padj from that test, BH-adjusted); apeglm shrinkage applied to the LFC (Zhu et al.).
 res_g <- lfcShrink(dds, coef = "condition_Amputated_vs_Control", type = "apeglm")
 deg <- as.data.table(as.data.frame(res_g), keep.rownames = "gene_id")
 deg[, symbol := lab_for(gene_id)]
@@ -465,8 +568,13 @@ fwrite(deg, file.path(DAT, "gene_de_tail.tsv"), sep = "\t")
 nsig_g <- deg[!is.na(padj) & padj < 0.05, .N]
 cat(sprintf("  gene DE: %d genes FDR<0.05\n", nsig_g))
 
+# DE volcano — EnhancedVolcano. Labels are FORCED to the top 5 up + top 5 down
+# NAMED genes by FDR (selectLab), so the down side is never silently dropped.
+# Cool "winter" palette (blue-green).
 de_df  <- as.data.frame(res_g); de_df <- de_df[!is.na(de_df$padj), ]
 de_dt  <- as.data.table(de_df, keep.rownames = "gene_id")[, symbol := disp_name(gene_id)]
+# gets drawn on all of them, turning 10 intended labels into 15. Repeated symbols are
+# disambiguated with their LOC id. (Same duplicate-symbol trap as 03_promoters fig3c.)
 de_dt[, lab_uniq := fifelse(duplicated(symbol) | duplicated(symbol, fromLast = TRUE),
                             paste0(symbol, " (", gene_id, ")"), symbol)]
 de_lab <- de_dt$lab_uniq                                 # row-aligned with de_df
@@ -476,6 +584,7 @@ sel_de <- c(de_dt[padj < 0.05 & log2FoldChange >=  1][order(padj)][seq_len(min(5
             de_dt[padj < 0.05 & log2FoldChange <= -1][order(padj)][seq_len(min(5, .N)), lab_uniq])
 stopifnot(!anyDuplicated(sel_de))
 pvg <- EnhancedVolcano(de_df, lab = de_lab, x = "log2FoldChange", y = "padj",
+  # the y column is ADJUSTED P, so the default "-Log10 P" axis would misstate it
   xlab = bquote(Log[2]~"fold change (regenerated vs control)"),
   ylab = bquote(-Log[10]~"adjusted"~italic(P)),
   selectLab = sel_de, pCutoff = 0.05, FCcutoff = 1,
@@ -501,6 +610,16 @@ ptg <- ggplot(top_g, aes(log2FoldChange, dlab, fill = dir)) +
   theme(axis.text.y = element_text(size = 7))
 save_supp(ptg, "figS_top_de_genes", 5, 5)
 
+# NOTE: an isoform-level transcript analysis that used to live here (formerly §7c)
+# objects/salmon/ index+quants it produced are now unused.
+
+# ---- [5c] figS_uhrf_domains: can DNMT1 maintain methylation with no UHRF1? ---
+# (Placed after §7 by file history; reuses §5b's PROJ/PFAM/HMMER_BIN paths.)
+# eggNOG calls UHRF1 absent but UHRF2 PRESENT (LOC_00011698). The UHRF1/2 pair is a
+# VERTEBRATE duplication, so "UHRF1 lost" is a paralog-level claim the data cannot
+# support: D. laeve has ONE UHRF-family gene, and function follows domains, not names.
+# Asks whether that UHRF keeps SRA (PF02182) + RING (PF13445/PF13639/PF00097) and
+# whether DNMT1 keeps RFTS (PF12047), against human UHRF1/UHRF2 references.
 cat("[5c] figS_uhrf_domains: UHRF/DNMT1 domain architecture\n")
 UHRF_REF <- file.path(PROJ, "tools/dnmt/uhrf_queries.fasta")
 PROTEOME <- "/mnt/data/alfredvar/30-Genoma/31-Alternative_Annotation_EviAnn/derLaeGenome_namesDlasi_v2.fasta.functional_note.proteins.fasta"
@@ -511,8 +630,10 @@ if (file.exists(UHRF_REF) && file.exists(PROTEOME) && dir.exists(HMMER_BIN)) {
     i <- which(loc_of == loc); if (!length(i)) return(NULL)
     s <- prot[i[which.max(width(prot[i]))]]; names(s) <- lab; s
   }
-  qry <- c(pick_longest("LOC_00011698", "UHRF2_D.laeve"),   # LOC ids hardcoded from §5's eggNOG assignments (UHRF2, DNMT1)
-           pick_longest("LOC_00009210", "DNMT1_D.laeve"),
+  uhrf_locus <- toolkit[gene_symbol == "UHRF (1/2)", gene_id]; dnmt1_locus <- toolkit[gene_symbol == "DNMT1", gene_id]
+  stopifnot(length(uhrf_locus) == 1L, nzchar(uhrf_locus), length(dnmt1_locus) == 1L, nzchar(dnmt1_locus))   # from §5's eggNOG assignment, never hardcoded
+  qry <- c(pick_longest(uhrf_locus, "UHRF2_D.laeve"),
+           pick_longest(dnmt1_locus, "DNMT1_D.laeve"),
            readAAStringSet(UHRF_REF))
   scr2 <- file.path(tempdir(), "uhrf"); dir.create(scr2, showWarnings = FALSE)
   ufa <- file.path(scr2, "uhrf.faa"); writeXStringSet(qry, ufa)
@@ -525,6 +646,7 @@ if (file.exists(UHRF_REF) && file.exists(PROTEOME) && dir.exists(HMMER_BIN)) {
                      start = as.integer(vapply(up, `[`, "", 18)),
                      end   = as.integer(vapply(up, `[`, "", 19)))
   plen <- data.table(protein = names(qry), len = width(qry))
+  # keep the domains that carry the maintenance-methylation logic
   KEEP <- c(PF00240 = "UBL", PF12148 = "TTD", PF00628 = "PHD", PF02182 = "SRA",
             PF13445 = "RING", PF13639 = "RING", PF00097 = "RING", PF12047 = "RFTS",
             PF02008 = "CXXC", PF01426 = "BAH", PF00145 = "MTase")
@@ -545,6 +667,7 @@ if (file.exists(UHRF_REF) && file.exists(PROTEOME) && dir.exists(HMMER_BIN)) {
               size = 2.2, colour = "grey20") +
     scale_fill_manual(values = COL_DOM, name = NULL) +
     scale_y_discrete(limits = rev(ord)) +
+    # RING/H3-ubiquitination step this scan does not recover — it overstated the data.
     labs(x = "Amino-acid position", y = NULL,
          title = "Maintenance-methylation domain architecture") +
     theme_pub() + theme(legend.position = "bottom")
@@ -553,18 +676,27 @@ if (file.exists(UHRF_REF) && file.exists(PROTEOME) && dir.exists(HMMER_BIN)) {
     paste(sort(unique(udom[protein == p]$dom)), collapse = ", ")))
 } else cat("  SKIPPED - UHRF refs / proteome / HMMER not available\n")
 
+# ---- [8] fig1e: cross-species mollusc CpG O/E (log tag "[N]") ----------------
+# Germline deamination (CpG -> TpG/CpA) depletes CpG in methylated genomes; computes
+# genome-wide dinucleotide O/E for D. laeve + 4 molluscs (genomes pre-staged in
+# dataset/mollusc_genomes/, NCBI accessions below). Writes mollusc_dinucleotide_oe.tsv,
+# fig1e and one figS_dinuc_<species> per species.
+# not somatic methylation, which was measured only in D. laeve.
 cat("[N] cross-species mollusc CpG O/E (deamination signature)\n")
 MOLLDIR <- file.path(BATCH, "dataset", "mollusc_genomes")
 molluscs <- data.table(
   species = c("Deroceras laeve", "Pomacea canaliculata", "Elysia atroviridis",
               "Aplysia californica", "Octopus bimaculoides"),
   group   = c("Gastropoda", "Gastropoda", "Gastropoda", "Gastropoda", "Cephalopoda"),
+  # are whole NCBI assemblies (unplaced, repeat-rich scaffolds included) and repeat
+  # content shifts CpG O/E, so a chromosome-only subset would not be like with like.
   fa = c(GENOME_FULL,                                                                  # ours (whole assembly)
          file.path(MOLLDIR, "GCF_003073045.1_ASM307304v1_genomic.fna.gz"),            # Pomacea
          file.path(MOLLDIR, "GCA_059052615.1_ASM5905261v1_genomic.fna.gz"),           # Elysia atroviridis
          file.path(MOLLDIR, "GCF_000002075.1_AplCal3.0_genomic.fna.gz"),              # Aplysia
          file.path(MOLLDIR, "GCF_001194135.2_ASM119413v2_genomic.fna.gz")))           # Octopus bimaculoides
 COL_GROUP <- c(Gastropoda = "#0072B2", Cephalopoda = "#D55E00")
+# genome-wide dinucleotide O/E for one FASTA (one genome loaded at a time, then freed)
 dinuc_one <- function(fa) {
   g   <- readDNAStringSet(fa)
   di  <- colSums(dinucleotideFrequency(g)); obs <- di / sum(di)
@@ -578,6 +710,7 @@ dinuc_one <- function(fa) {
 oe_all <- rbindlist(lapply(seq_len(nrow(molluscs)), function(i) {
   if (!file.exists(molluscs$fa[i])) { cat(sprintf("  MISSING genome, skipped: %s\n", molluscs$fa[i])); return(NULL) }
   dt <- dinuc_one(molluscs$fa[i]); dt[, `:=`(species = molluscs$species[i], group = molluscs$group[i])]
+  # per-species dinucleotide-frequency SUPPLEMENTARY figure (fig1a style: bars = observed, diamonds = expected)
   d <- copy(dt); d[, dinucleotide := factor(dinucleotide, levels = dinucleotide[order(-observed)])]
   d[, is_cg := ifelse(dinucleotide == "CG", "CG", "other")]
   ps <- ggplot(d, aes(dinucleotide, 100 * observed, fill = is_cg)) +
@@ -590,7 +723,11 @@ oe_all <- rbindlist(lapply(seq_len(nrow(molluscs)), function(i) {
   dt
 }))
 fwrite(oe_all, file.path(DAT, "mollusc_dinucleotide_oe.tsv"), sep = "\t")
+# COMBINED figure: genome-wide CpG O/E across all five molluscs. Every species below O/E = 1
+# is the shared deamination signature; colour separates gastropods from the cephalopod.
 cg <- oe_all[dinucleotide == "CG"][order(ratio_obs_exp)]
+# Abbreviate the genus on the axis ("Deroceras laeve" -> "D. laeve"). At the canvas width
+# this panel is actually rendered at, the full binomials run off the left edge.
 cg[, label := sub("^([A-Z])[a-z]+ ", "\\1. ", species)]
 cg[, label := factor(label, levels = label)]
 cg[, species := factor(species, levels = species)]
@@ -598,6 +735,8 @@ pe <- ggplot(cg, aes(label, ratio_obs_exp, fill = group)) +
   geom_col(width = 0.7, colour = "black", linewidth = 0.2) +
   geom_hline(yintercept = 1, linetype = "dashed", colour = "grey40", linewidth = 0.4) +
   geom_text(aes(label = sprintf("%.2f", ratio_obs_exp)), vjust = -0.4, size = 3) +
+  # GC under each bar: CpG O/E covaries with G+C content as a property of the measure itself
+  # (Duret & Galtier 2000), so the reader must be able to see the GC of every bar being compared.
   geom_text(aes(y = 0.04, label = sprintf("%.0f%%", 100 * gc)), size = 2.0, colour = "white") +
   scale_fill_manual(values = COL_GROUP, name = NULL) +
   coord_cartesian(ylim = c(0, 1.08)) +
@@ -606,6 +745,174 @@ pe <- ggplot(cg, aes(label, ratio_obs_exp, fill = group)) +
   theme_pub() + theme(axis.text.x = element_text(angle = 20, hjust = 1, face = "italic"))
 save_fig(pe, "fig1e_mollusc_cpg_oe", 3.4, 2.1)
 
+# ---- [8b] figS_toolkit_mrna_atlas: toolkit expression across the tissue atlas ---
+# The first question after "no DNMT3, yet gains" is whether the writer is induced. [6]
+# answers it for the tail contrast; this panel shows every present toolkit gene across
+# the 40-library atlas (44 minus the four outliers of 07_wgcna: T1S5, dcrep4, R6, irrep7)
+# as the mean DESeq2 normalised count per experiment group. Groups are never pooled
+# across experiments (label rule): each column is one group and each experiment keeps
+# its own control. Decode = the lab's sample sheet (META, read-only).
+cat("[8b] toolkit mRNA across the 40-library atlas\n")
+META <- "/mnt/data/alfredvar/rlopezt/WGCNA/metadata.tsv"
+meta_atlas <- fread(META)[!orig_sample %in% c("T1S5", "dcrep4", "R6", "irrep7")]
+ht_files <- list.files(HTSEQ, pattern = "_htseq_gene_counts\\.txt$")
+ht_base  <- sub("\\.Aligned\\.out\\.bam_htseq_gene_counts\\.txt$|_htseq_gene_counts\\.txt$", "", ht_files)
+meta_atlas[, path := file.path(HTSEQ, ht_files[match(orig_sample, ht_base)])]
+if (anyNA(meta_atlas$path)) {
+  cat(sprintf("  WARNING: %d atlas libraries have no HTSeq file and are dropped: %s\n",
+              sum(is.na(meta_atlas$path)), paste(meta_atlas[is.na(path), orig_sample], collapse = ", ")))
+  meta_atlas <- meta_atlas[!is.na(path)]
+}
+cl_atlas <- lapply(meta_atlas$path, function(f)
+  fread(f, header = FALSE, col.names = c("gene_id", "count"))[!startsWith(gene_id, "__")])
+stopifnot(all(vapply(cl_atlas, function(x) identical(x$gene_id, cl_atlas[[1]]$gene_id), logical(1))))
+cm_atlas <- sapply(cl_atlas, function(x) x$count)
+rownames(cm_atlas) <- cl_atlas[[1]]$gene_id; colnames(cm_atlas) <- meta_atlas$sample
+cm_atlas <- cm_atlas[rownames(cm_atlas) %in% gene_id, , drop = FALSE]       # chromosome universe
+cm_atlas <- cm_atlas[rowSums(cm_atlas >= 5) >= 2, , drop = FALSE]           # expressed
+dds_atlas <- estimateSizeFactors(DESeqDataSetFromMatrix(
+  cm_atlas, data.frame(group = meta_atlas$group, row.names = meta_atlas$sample), design = ~ 1))
+norm_atlas <- counts(dds_atlas, normalized = TRUE)
+cat(sprintf("  %d genes x %d atlas libraries, %d experiment groups\n",
+            nrow(norm_atlas), ncol(norm_atlas), uniqueN(meta_atlas$group)))
+tk_atlas <- toolkit[present == TRUE & gene_id %in% rownames(norm_atlas)]
+grp_levels <- c("TailControl", "TailAmputated", "EyeControl", "EyeAmputated",
+                "IrradiatedControl", "IrradiatedTreated", "FungicideControl", "FungicideTreated",
+                "Head", "Juvenile", "Ovotestis")
+atlas <- rbindlist(lapply(seq_len(nrow(tk_atlas)), function(i)
+  data.table(gene_symbol = tk_atlas$ortholog[i], category = tk_atlas$category[i],
+             gene_id = tk_atlas$gene_id[i], group = meta_atlas$group, sample = meta_atlas$sample,
+             norm_count = as.numeric(norm_atlas[tk_atlas$gene_id[i], ]))))
+fwrite(atlas, file.path(DAT, "toolkit_mrna_atlas_per_library.tsv"), sep = "\t")
+atlas_mean <- atlas[, .(mean_norm = mean(norm_count), sd_norm = sd(norm_count), n = .N),
+                    by = .(gene_symbol, category, gene_id, group)]
+fwrite(atlas_mean, file.path(DAT, "toolkit_mrna_atlas.tsv"), sep = "\t")
+atlas_mean[, `:=`(group = factor(group, levels = intersect(grp_levels, unique(group))),
+                  cat_broad = factor(broad_cat(category), levels = broad_levels))]
+setorder(atlas_mean, cat_broad, gene_symbol)
+atlas_mean[, gene_symbol := factor(gene_symbol, levels = rev(unique(gene_symbol)))]
+pa8 <- ggplot(atlas_mean, aes(group, gene_symbol, fill = log10(mean_norm + 1))) +
+  geom_tile(colour = "white", linewidth = 0.4) +
+  scale_fill_viridis_c(option = "mako", direction = -1, name = "log10 mean\nnorm. counts") +
+  facet_grid(cat_broad ~ ., scales = "free_y", space = "free_y", switch = "y") +
+  labs(x = NULL, y = NULL, title = "Methylation toolkit across the tissue atlas (40 libraries)") +
+  theme_pub() +
+  theme(strip.placement = "outside", strip.background = element_blank(),
+        strip.text.y.left = element_text(angle = 0, hjust = 1, size = 7, colour = "grey25"),
+        axis.text.x = element_text(angle = 35, hjust = 1, size = 7),
+        axis.text.y = element_text(size = 7), panel.grid.major.y = element_blank())
+save_supp(pa8, "figS_toolkit_mrna_atlas", 6.4, 5.4)
+
+# ---- [8c] figS_dnmt_c5_tree: C5-cytosine methyltransferase gene tree ---------------
+# DNMT3 absence should be phylogenetic, not a BLAST miss. The DNA_methylase (Pfam
+# PF00145) domains of the D. laeve DNMT1 and DNMT2/TRDMT1 loci are placed among the
+# reviewed vertebrate DNMT1, DNMT3A, DNMT3B, DNMT3L and TRDMT1 proteins and every UniProt
+# "DNA (cytosine-5)-methyltransferase" of Mollusca (dataset/dnmt_refs, staged once from
+# node12 by fetch_dnmt_refs.sh), with the bacterial M.HhaI as outgroup. Domains are cut to
+# the Pfam envelope (hmmsearch --cut_ga), aligned (MAFFT --auto), trimmed (trimAl
+# -automated1) and a maximum likelihood tree is built (IQ-TREE 3, ModelFinder, 1,000
+# clade would contradict the toolkit call; none is expected.
+cat("[8c] C5-methyltransferase gene tree\n")
+suppressPackageStartupMessages({ library(ape); library(phangorn) })
+DNMT_REF <- file.path(BATCH, "dataset", "dnmt_refs")
+ref_files <- file.path(DNMT_REF, c("vertebrate_reviewed.fasta", "mollusca_uniprot.fasta", "outgroup_MHhaI.fasta"))
+stopifnot(all(file.exists(ref_files)), all(file.size(ref_files) > 100))
+refs <- do.call(c, lapply(ref_files, readAAStringSet))
+names(refs) <- sub(" .*", "", names(refs))                        # sp|P26358|DNMT1_HUMAN
+ref_meta <- fread(file.path(DNMT_REF, "mollusca_uniprot.tsv"))
+setnames(ref_meta, c("acc", "entry", "gene_names", "organism", "length", "reviewed", "protein_names"))
+prot_all <- readAAStringSet(PROTE); names(prot_all) <- sub(" .*", "", names(prot_all))
+dl_loci <- toolkit[gene_symbol %in% c("DNMT1", "DNMT2") & present == TRUE, gene_id]
+dl_seq <- do.call(c, lapply(dl_loci, function(L) {                 # longest isoform per locus
+  s <- prot_all[startsWith(names(prot_all), paste0(L, "-"))]; s[which.max(width(s))] }))
+names(dl_seq) <- paste0("DLAEVE|", dl_loci, "|", toolkit[match(dl_loci, gene_id), gene_symbol])
+all_aa <- c(dl_seq, refs)
+all_aa <- all_aa[!duplicated(names(all_aa))]
+# simple tip ids: MAFFT/IQ-TREE keep names, but "|" and spaces in Newick are fragile
+tipmap <- data.table(tip = sprintf("t%03d", seq_along(all_aa)), name = names(all_aa))
+names(all_aa) <- tipmap$tip
+acc_of <- function(nm) ifelse(startsWith(nm, "DLAEVE"), sub("^DLAEVE\\|([^|]+)\\|.*$", "\\1", nm),
+                              sub("^(sp|tr)\\|([^|]+)\\|.*$", "\\2", nm))
+tipmap[, acc := acc_of(name)]
+tipmap[, entry := ifelse(startsWith(name, "DLAEVE"), sub(".*\\|", "", name), sub("^(sp|tr)\\|[^|]+\\|", "", name))]
+tipmap <- merge(tipmap, ref_meta[, .(acc, gene_names, organism)], by = "acc", all.x = TRUE)
+tipmap[, species := ifelse(startsWith(name, "DLAEVE"), "Deroceras laeve",
+                    ifelse(!is.na(organism), sub("^(\\S+ \\S+).*$", "\\1", organism),
+                    ifelse(grepl("_HUMAN$", entry), "Homo sapiens", ifelse(grepl("_MOUSE$", entry), "Mus musculus",
+                    ifelse(grepl("_HAEHA$|MTH1", entry), "Haemophilus haemolyticus (M.HhaI)", "unknown")))))]
+gene_lab <- toupper(ifelse(startsWith(tipmap$name, "DLAEVE"), tipmap$entry,
+                    ifelse(!is.na(tipmap$gene_names), sub(" .*", "", tipmap$gene_names), sub("_.*$", "", tipmap$entry))))
+tipmap[, gene := gene_lab]
+tipmap[, class := fifelse(startsWith(name, "DLAEVE"), "D. laeve",
+                  fifelse(grepl("^DNMT3|^DNMT3A|^DNMT3B|^DNMT3L", gene), "DNMT3 family",
+                  fifelse(grepl("^DNMT1", gene), "DNMT1",
+                  fifelse(grepl("^TRDMT1|^DNMT2", gene), "TRDMT1 / DNMT2",
+                  fifelse(species == "Haemophilus haemolyticus (M.HhaI)", "Outgroup (M.HhaI)", "Mollusc, unnamed")))))]
+tipmap[, label := sprintf("%s  %s  (%s)", species, gene, acc)]
+scr8 <- file.path(if (nzchar(Sys.getenv("SLURM_JOB_ID"))) file.path("/scratch/groups/alfredvar", Sys.getenv("USER"),
+                                                                     paste0("job_", Sys.getenv("SLURM_JOB_ID"))) else tempdir(), "dnmt_tree")
+dir.create(scr8, recursive = TRUE, showWarnings = FALSE)
+fa8 <- file.path(scr8, "all.faa"); writeXStringSet(all_aa, fa8)
+hmm8 <- file.path(scr8, "DNA_methylase.hmm")
+system2(file.path(HMMER_BIN, "hmmfetch"), c(PFAM, "DNA_methylase"), stdout = hmm8)
+dom8 <- file.path(scr8, "dna_methylase.domtblout")
+system2(file.path(HMMER_BIN, "hmmsearch"), c("--cut_ga", "--domtblout", dom8, "-o", "/dev/null", hmm8, fa8))
+dt8 <- fread(cmd = sprintf("awk '!/^#/{print $1\"\\t\"$14\"\\t\"$20\"\\t\"$21}' %s", shQuote(dom8)),
+             header = FALSE, col.names = c("tip", "score", "env_from", "env_to"))
+dt8 <- dt8[order(tip, -score)][, .SD[1], by = tip][env_to - env_from + 1L >= 150L]   # best, near-complete domain per protein
+tipmap[, in_tree := tip %in% dt8$tip]
+fwrite(tipmap[, .(tip, acc, species, gene, class, in_tree, name)], file.path(DAT, "dnmt_c5_tree_members.tsv"), sep = "\t")
+cat(sprintf("  %d of %d proteins carry a DNA_methylase domain of >= 150 aa; D. laeve tips in the tree: %s\n",
+            nrow(dt8), length(all_aa), paste(tipmap[in_tree == TRUE & class == "D. laeve", gene], collapse = ", ")))
+if (nrow(dt8) >= 4) {
+  dom_aa <- AAStringSet(vapply(seq_len(nrow(dt8)), function(i)
+    as.character(subseq(all_aa[[dt8$tip[i]]], dt8$env_from[i], dt8$env_to[i])), character(1)))
+  names(dom_aa) <- dt8$tip
+  writeXStringSet(dom_aa, file.path(scr8, "dom.faa"))
+  NP8 <- Sys.getenv("SLURM_CPUS_PER_TASK", "4")
+  st <- system2("mafft", c("--auto", "--quiet", "--anysymbol", "--thread", NP8, shQuote(file.path(scr8, "dom.faa"))),
+                stdout = file.path(scr8, "aln.faa")); stopifnot(st == 0)
+  st <- system2("trimal", c("-in", shQuote(file.path(scr8, "aln.faa")), "-out", shQuote(file.path(scr8, "aln.trim.faa")),
+                            "-automated1")); stopifnot(st == 0)
+  st <- system2("iqtree3", c("-s", shQuote(file.path(scr8, "aln.trim.faa")), "-m", "MFP", "-bb", "1000", "-nt", NP8,
+                             "-seed", "20260426", "-pre", shQuote(file.path(scr8, "dnmt")), "-quiet", "-redo")); stopifnot(st == 0)
+  tr8 <- phangorn::midpoint(read.tree(file.path(scr8, "dnmt.treefile")), node.labels = "support")
+  file.copy(file.path(scr8, "dnmt.treefile"), file.path(DAT, "dnmt_c5_tree_unrooted.nwk"), overwrite = TRUE)
+  write.tree(tr8, file.path(DAT, "dnmt_c5_tree_midpoint.nwk"))
+  file.copy(file.path(scr8, "dnmt.iqtree"), file.path(DAT, "dnmt_c5_tree_iqtree_report.txt"), overwrite = TRUE)
+  tips8 <- tipmap[match(tr8$tip.label, tip)]
+  col8 <- c(`D. laeve` = "#D55E00", DNMT1 = "#0072B2", `DNMT3 family` = "#009E73",
+            `TRDMT1 / DNMT2` = "#CC79A7", `Mollusc, unnamed` = "grey45", `Outgroup (M.HhaI)` = "black")
+  draw_tree <- function() {
+    op <- par(mar = c(3, 0.5, 2, 0.5)); on.exit(par(op))
+    plot(tr8, show.tip.label = TRUE, tip.color = col8[tips8$class], cex = 0.42, label.offset = 0.01,
+         font = ifelse(tips8$class == "D. laeve", 2, 1), no.margin = FALSE,
+         main = "C5-cytosine methyltransferase domains (PF00145), midpoint rooted", cex.main = 0.8)
+    tiplabels(pch = 16, col = col8[tips8$class], cex = 0.5, adj = 0.5)
+    sup8 <- suppressWarnings(as.numeric(tr8$node.label)); ok8 <- !is.na(sup8) & sup8 >= 70
+    nodelabels(text = ifelse(ok8, sup8, ""), frame = "none", cex = 0.35, adj = c(1.2, -0.3), col = "grey30")
+    add.scale.bar(cex = 0.5); legend("bottomleft", legend = names(col8), col = col8, pch = 16, bty = "n", cex = 0.55)
+  }
+  tr8$tip.label <- tips8$label
+  for (ext in c("pdf", "png", "svg")) {
+    f8 <- file.path(SUPP, paste0("figS_dnmt_c5_tree.", ext))
+    if (ext == "pdf") grDevices::cairo_pdf(f8, width = 7.5, height = 0.14 * length(tr8$tip.label) + 1.5)
+    else if (ext == "png") png(f8, width = 7.5, height = 0.14 * length(tr8$tip.label) + 1.5, units = "in", res = 150)
+    else svglite::svglite(f8, width = 7.5, height = 0.14 * length(tr8$tip.label) + 1.5)
+    draw_tree(); dev.off()
+  }
+  cat("  saved (supp) figS_dnmt_c5_tree\n")
+} else cat("  fewer than 4 domain sequences: tree skipped\n")
+
+# ---- [TF] TRANSCRIPTION-FACTOR ANNOTATION ----
+# codes". The complete sequence-orthology pipeline (JASPAR -> UniProt -> DIAMOND RBH
+# -> Pfam DBD licensing -> Cis-BP thresholds -> gene trees -> the bridge + the
+# tf_dlaeve_guide) now runs here; 08_motifs (motif enrichment) reads
+# 01_genome_toolkit/data/jaspar_ortholog_bridge.tsv. Wrapped in local() so its helpers and
+# constants (run/need/fw, theme_pub, BATCH/OBJ/DAT/FIGS, palettes) cannot collide
+# with 01_genome_toolkit's; all outputs land under 01_genome_toolkit/{data,objects,figures}. Staged
+# network inputs (bait FASTA, Cis-BP thresholds) live in 01_genome_toolkit/objects now; the
+# BATCH02B_FETCH_ONLY=1 node12 staging mode still works and exits the whole script.
 local({
 set.seed(20260426)
 suppressPackageStartupMessages({
@@ -614,6 +921,7 @@ suppressPackageStartupMessages({
   library(ape); library(phangorn); library(parallel); library(GenomicRanges)
 })
 
+# ---- [0] Configuration -------------------------------------------------------
 PIPE   <- "/mnt/data/alfredvar/rlopezt/meth_paper/main/methylation_pipeline"
 ROOT   <- "/mnt/data/alfredvar/rlopezt/meth_paper"
 BATCH  <- file.path(PIPE, "01_genome_toolkit")
@@ -627,18 +935,26 @@ for (d in c(OBJ, DAT, FIGS, SEQD, DIAD, PFAMD, TREED))
 JASPAR_DB <- file.path(ROOT, "tools/jaspar/JASPAR2024.sqlite")
 PFAM_HMM  <- file.path(ROOT, "tools/pfam/Pfam-A.hmm")     # already hmmpress'ed, never redo
 HMMER_BIN <- file.path(ROOT, "tools/hmmer/bin")           # 3.4: the build that pressed Pfam-A
+# Canonical read-only EviAnn proteome in the shared lab tree (the old implementation
 PROTEOME  <- "/mnt/data/alfredvar/30-Genoma/31-Alternative_Annotation_EviAnn/derLaeGenome_namesDlasi_v2.fasta.functional_note.proteins.fasta"
 TAXGROUPS <- c("vertebrates", "insects", "nematodes", "urochordates")  # mollusks are not a JASPAR group
 NPROC     <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "8"))
 
+# motif library for the WHOLE paper, so they are named here, never buried in a
+# filter; the pwm_library_decision_grid table records what every combination gives.
+#   ORTH_HOMOLOGY  "rbh" = reciprocal best hit only (strict) | "rbh_or_tree" = RBH or resolved tree placement
 ORTH_HOMOLOGY <- "rbh"
-ORTH_IDENTITY <- "cisbp"   # author decision, 2026-08-25
+ORTH_IDENTITY <- "cisbp"
+ORTH_DIMER    <- "any"     # heterodimer matrices (A::B): "any" = kept when at least one subunit passes the gate,
+                           # "both" = every subunit must pass. Recorded per matrix as n_subunits_kept / n_subunits.
 TREE_MAX_CLADE   <- 10L   # a placement into a clade larger than this resolved nothing
 TREE_MIN_SUPPORT <- 70    # ultrafast bootstrap at the clade-defining node
 
 stopifnot(file.exists(JASPAR_DB), file.exists(PFAM_HMM), file.exists(PROTEOME),
           dir.exists(HMMER_BIN))
 
+# ---- [0b] Helpers ------------------------------------------------------------
+# two once wrote diagnostics into dbd.hmm -> hmmpress -> garbage domain table.
 run <- function(cmd, args, out = NULL, quiet = TRUE) {
   t0 <- Sys.time()
   err <- tempfile()
@@ -651,9 +967,11 @@ run <- function(cmd, args, out = NULL, quiet = TRUE) {
   }
   unlink(err); invisible(st)
 }
+# Trust outputs, not exit codes: jobs here have exited 0 with truncated results.
 need <- function(path, what, min_rows = 1L, comment = "#") {
   if (!file.exists(path) || file.size(path) == 0)
     stop(sprintf("%s produced no output at %s", what, path), call. = FALSE)
+  # 374 real rows that passed an existence-only check; hence the row-count floor.
   n <- length(grep(sprintf("^%s", comment), readLines(path, warn = FALSE), invert = TRUE, value = TRUE))
   if (n < min_rows)
     stop(sprintf("%s produced only %d data rows at %s (expected >= %d)", what, n, path, min_rows), call. = FALSE)
@@ -683,6 +1001,10 @@ save_supp <- function(p, stem, width, height) {
   cat(sprintf("  saved %s (%.1f x %.1f in)\n", stem, width, height))
 }
 
+# ---- [1] JASPAR matrix -> UniProt accession ----------------------------------
+# Latest VERSION per BASE_ID in CORE, four animal tax groups, joined to MATRIX_PROTEIN.
+# Long format: a heterodimer (ELK1::HOXA1) expands to one row per partner, never
+# dropped. Writes matrix_to_acc.tsv.
 cat("[TF 1] JASPAR2024 CORE -> UniProt accessions\n")
 con <- dbConnect(SQLite(), JASPAR_DB)
 m2a <- as.data.table(dbGetQuery(con, sprintf("
@@ -707,10 +1029,14 @@ cat(sprintf("  %d matrices, %d with an accession, %d unique accessions\n",
             N_MATRIX, uniqueN(m2a[nzchar(acc), matrix_id]), length(accs)))
 fw(m2a, file.path(DAT, "matrix_to_acc.tsv"))
 
+# ---- [2] Bait sequences from UniProt (needs network: node12, not defq) -------
+# /uniprotkb/accessions, comma-separated, batches of 150; canonical sequence only.
+# returns an EMPTY body with HTTP 200.
 BAITS <- file.path(SEQD, "bait_tfs.faa")
 if (!file.exists(BAITS)) {
   cat("[TF 2] fetching bait sequences from UniProt (needs network: node12, not defq)\n")
   chunks <- split(accs, ceiling(seq_along(accs) / 150))
+  # so only the final batch survives (30 of 1,230 sequences, every curl exit 0).
   got <- character(0)
   for (i in seq_along(chunks)) {
     out <- system2("curl", c("-sS", "--retry", "3", "--retry-delay", "2", "--max-time", "180",
@@ -729,14 +1055,18 @@ names(bait_aa) <- vapply(strsplit(names(bait_aa), "\\|"), function(x) if (length
 bait_aa <- bait_aa[!duplicated(names(bait_aa))]
 missing_acc <- setdiff(accs, names(bait_aa))
 cat(sprintf("  %d sequences; %d accessions missing\n", length(bait_aa), length(missing_acc)))
+# whole library; >10% missing baits means restage on node12, not proceed
 stopifnot(length(missing_acc) < 0.10 * length(accs))
 
+# Fetch-only mode (BATCH02B_FETCH_ONLY=1, once on node12): stage [2] and verify the
+# [7] thresholds file, then stop — defq compute nodes have no network (see header).
 if (Sys.getenv("BATCH02B_FETCH_ONLY") == "1") {
   stopifnot(file.exists(THRESH_CHECK <- file.path(OBJ, "cisbp_family_thresholds.tsv")))
-  cat("[TF fetch-only] bait sequences and Cis-BP thresholds are staged; stopping before the compute\n")
+  cat("[TF fetch-only] bait sequences fetched; the Cis-BP thresholds file (external, dataset/cisbp) is present; stopping before the compute\n")
   quit(save = "no", status = 0)
 }
 
+# ---- [3] DIAMOND both directions, isoforms collapsed to locus, RBH -----------
 cat("[TF 3] DIAMOND blastp both directions vs the EviAnn proteome\n")
 DB   <- file.path(DIAD, "proteome")
 FWD  <- file.path(DIAD, "fwd.tsv"); REV <- file.path(DIAD, "rev.tsv")
@@ -749,8 +1079,11 @@ run("diamond", c("blastp", "--ultra-sensitive", "--quiet", "-p", NPROC, "-k", "2
 fwd <- fread(need(FWD, "DIAMOND forward"), header = FALSE,
              col.names = c("acc", "protein", "pident", "len", "evalue", "bits"))
 fwd[, locus := sub("-mRNA-[0-9]+$", "", protein)]
+# collapse isoforms: one representative per locus, the highest-scoring isoform
 best_iso <- fwd[order(-bits), .SD[1], by = .(acc, locus)]
+# forward best locus per bait
 fwd_best <- best_iso[order(-bits), .SD[1], by = acc][, .(acc, locus, fwd_bits = bits)]
+# reverse: each candidate locus representative back against the baits
 rep_iso <- unique(best_iso[order(-bits), .SD[1], by = locus][, .(locus, protein)])
 prot_all <- readAAStringSet(PROTEOME)
 names(prot_all) <- sub("\\s.*$", "", names(prot_all))
@@ -766,11 +1099,13 @@ rev_ <- merge(rev_, rep_iso, by = "protein")
 rev_best <- rev_[order(-bits), .SD[1], by = locus][, .(locus, acc_back = acc)]
 cand <- merge(best_iso[, .(acc, locus, protein, fwd_bits = bits)], rev_best, by = "locus", all.x = TRUE)
 cand <- merge(cand, fwd_best[, .(acc, best_locus = locus)], by = "acc", all.x = TRUE)
+# secondary hit whose locus points back and roughly doubles the RBH count.
 cand[, is_rbh := fifelse(!is.na(acc_back) & acc_back == acc &
                          !is.na(best_locus) & locus == best_locus, "yes", "no")]
 cand <- cand[acc %in% fwd_best$acc | is_rbh == "yes"]
 cat(sprintf("  %d candidate pairs, %d reciprocal best hits\n", nrow(cand), sum(cand$is_rbh == "yes")))
 
+# ---- [4] Pfam domains --------------------------------------------------------
 cat("[TF 4] Pfam domains (hmmscan on baits; hmmsearch of DBD profiles over the proteome)\n")
 BAIT_DOM <- file.path(PFAMD, "baits.domtbl")
 run(file.path(HMMER_BIN, "hmmscan"),
@@ -778,6 +1113,8 @@ run(file.path(HMMER_BIN, "hmmscan"),
       shQuote(PFAM_HMM), shQuote(file.path(SEQD, "baits.clean.faa"))))
 bd <- read_domtbl(need(BAIT_DOM, "hmmscan on baits", min_rows = 500L), 1, 4)
 
+# The JASPAR structural class -> Pfam DBD map, reused verbatim from
+# analysis/tf_dbd/01_dbd_verification.R so the two agree by construction.
 CLASS2PFAM <- list(
   "Homeo domain factors" = c("Homeodomain","Homeobox","Homeobox_KN","Pou","CUT","HPD","PBC","SIX1_SD"),
   "C2H2 zinc finger factors" = c("zf-C2H2","zf-C2H2_2","zf-C2H2_3","zf-C2H2_4","zf-C2H2_5","zf-C2H2_6",
@@ -785,14 +1122,14 @@ CLASS2PFAM <- list(
     "zf-H2C2_5","zf-met","zf-met2","zf-BED"),
   "Basic helix-loop-helix factors (bHLH)" = "HLH",
   "Basic leucine zipper factors (bZIP)" = c("bZIP_1","bZIP_2","bZIP_Maf"),
-  "Nuclear receptors with C4 zinc fingers" = c("zf-C4","Hormone_recep"),
+  "Nuclear receptors with C4 zinc fingers" = c("zf-C4"),
   "Tryptophan cluster factors" = c("Ets","IRF","Myb_DNA-binding","Myb_DNA-bind_6"),
   "Fork head/winged helix factors" = c("Forkhead","E2F_TDP","WHD_E2F_TDP","RFX_DNA_binding"),
   "High-mobility group (HMG) domain factors" = c("HMG_box","HMG_box_2"),
   "Rel homology region (RHR) factors" = c("RHD_DNA_bind","COE1_DBD","BTD","LAG1-DNAbind"),
   "SMAD/NF-1 DNA-binding domain factors" = c("MH1","CTF_NFI"),
   "Paired box factors" = "PAX", "T-Box factors" = "T-box",
-  "Other C4 zinc finger-type factors" = c("GATA","zf-C4","Hormone_recep"),
+  "Other C4 zinc finger-type factors" = c("GATA","zf-C4"),
   "Basic helix-span-helix factors (bHSH)" = "TF_AP-2", "TEA domain factors" = "TEA",
   "STAT domain factors" = "STAT_bind", "MADS box factors" = "SRF-TF",
   "Heteromeric CCAAT-binding factors" = c("CBFB_NFYA","CBFD_NFYB_HMF"),
@@ -801,10 +1138,17 @@ CLASS2PFAM <- list(
   "Heat shock factors" = "HSF_DNA-bind", "GCM domain factors" = "GCM",
   "DM-type intertwined zinc finger factors" = "DM", "CRC domain" = "TCR",
   "C2CH THAP-type zinc finger factors" = "THAP", "ARID" = "ARID")
+# Two matrices carry no class row in JASPAR2024 but have an unambiguous DBD.
 NOCLASS2PFAM <- list("MA0506.3" = "Nrf1_DNA-bind", "MA1618.2" = "HLH")
 DBD_NAMES <- sort(unique(unlist(CLASS2PFAM, use.names = FALSE)))
 
+# Genome-wide DBD presence: hmmsearch the DBD profiles only (far faster than hmmscan
+# over all 85,163 proteins). NOT eggNOG: its vocabulary says Homeobox, so a literal
+# lookup of Homeodomain returns zero loci.
 DBD_HMM <- file.path(PFAMD, "dbd.hmm")
+# missing name AFTER writing earlier profiles, leaving a truncated, plausible dbd.hmm.
+# This release lacks E2F_TDP and Homeobox (redundant aliases of WHD_E2F_TDP and
+# Homeodomain), so dropping them costs nothing; the drop is REPORTED, never silent.
 pfam_on_disk <- unique(sub("^NAME\\s+", "", grep("^NAME", readLines(PFAM_HMM, warn = FALSE), value = TRUE)))
 absent <- setdiff(DBD_NAMES, pfam_on_disk)
 if (length(absent))
@@ -825,8 +1169,9 @@ run(file.path(HMMER_BIN, "hmmsearch"),
 pd <- read_domtbl(need(PROT_DOM, "hmmsearch on proteome", min_rows = 1000L), 4, 1)   # hmmsearch swaps the columns
 pd[, locus := sub("-mRNA-[0-9]+$", "", query)]
 
+# ---- [5] DBD licensing -------------------------------------------------------
 cat("[TF 5] DBD licensing: both proteins must carry the class-expected domain\n")
-acc2class <- merge(m2a[nzchar(acc), .(matrix_id, acc)], mclass, by = "matrix_id", allow.cartesian = TRUE)
+acc2class <- merge(m2a[nzchar(acc), .(matrix_id, acc)], mclass, by = "matrix_id", all.x = TRUE, allow.cartesian = TRUE)
 expected <- acc2class[, .(pfam = unique(unlist(c(CLASS2PFAM[class],
                                                  NOCLASS2PFAM[intersect(matrix_id, names(NOCLASS2PFAM))])))),
                       by = acc]
@@ -836,11 +1181,17 @@ locus_fam <- unique(pd[, .(protein = query, pfam, score, env_from, env_to)])
 lic <- merge(cand[, .(acc, locus, protein, fwd_bits, is_rbh)],
              merge(bait_fam, expected, by = c("acc", "pfam")), by = "acc", allow.cartesian = TRUE)
 lic <- merge(lic, locus_fam, by = c("protein", "pfam"), suffixes = c("_b", "_l"))
+# one row per (acc, locus): the best-scoring shared expected family
 lic <- lic[order(-score_b)][, .SD[1], by = .(acc, locus)]
 cat(sprintf("  %d licensed pairs over %d loci\n", nrow(lic), uniqueN(lic$locus)))
 
+# ---- [6] DBD identity, on both denominators ----------------------------------
+# PctID_O = identities / both-residue columns (ours); PctID_L = identities / length
+# on PctID_L, and PctID_O runs larger whenever the alignment gaps: both are written,
+# THE GATE USES PctID_L.
 cat(sprintf("[6] pairwise DBD alignment for %d licensed pairs (MAFFT, %d cores)\n", nrow(lic), NPROC))
 prot_rep <- prot_all[unique(lic$protein)]
+# shared storage once failed 9,175 of 9,175 alignments on the file race.
 pair_id <- function(i) {
   b <- subseq(bait_aa[[lic$acc[i]]], lic$env_from_b[i], lic$env_to_b[i])
   l <- subseq(prot_rep[[lic$protein[i]]], lic$env_from_l[i], lic$env_to_l[i])
@@ -859,6 +1210,8 @@ pair_id <- function(i) {
     100 * ident / max(nchar(b), nchar(l)),                            # PctID_L
     sum(k))
 }
+# unguarded do.call(rbind, ...) then silently stops being a matrix, and a swallow-
+# everything run once died at [8] with an empty table, far from the real cause.
 probe <- tryCatch(pair_id(1L), error = function(e) stop(sprintf(
   "the first DBD alignment failed, so the rest will too: %s", conditionMessage(e)), call. = FALSE))
 if (is.na(probe[2])) stop("the first DBD alignment returned no result; is mafft on PATH?", call. = FALSE)
@@ -867,6 +1220,7 @@ pid <- do.call(rbind, mclapply(seq_len(nrow(lic)), pid_safe, mc.cores = NPROC))
 stopifnot(is.matrix(pid), nrow(pid) == nrow(lic))
 ok <- sum(!is.na(pid[, 2]))
 cat(sprintf("  %d of %d pairs aligned (%.1f%%)\n", ok, nrow(pid), 100 * ok / nrow(pid)))
+# A few unalignable pairs are normal; a mass failure is a broken run, not a result.
 if (ok < 0.5 * nrow(pid))
   stop(sprintf("only %d of %d DBD alignments succeeded: refusing to continue on a broken step",
                ok, nrow(pid)), call. = FALSE)
@@ -877,20 +1231,33 @@ fw(lic[, .(acc, locus, protein, pfam_dbd = pfam, pid_dbd = round(pid_dbd, 2),
    file.path(DAT, "dbd_identity.tsv"))
 cat(sprintf("  %d pairs with an identity; median PctID_L %.1f\n", nrow(lic), median(lic$pid_dbd_L)))
 
+# ---- [7] Cis-BP / Weirauch motif-transfer thresholds (staged file) -----------
+# Per-DBD-family identity above which a measured motif transfers. Weirauch et al.
+# 2014 Cell (PMID 25215497) set the per-family thresholds; Lambert et al. 2019 Nat
+# Genet (PMID 31133749) showed motif divergence is pervasive, worst in C2H2 zinc
+# fingers, which is why those families end up near-untransferable.
 THRESH <- file.path(OBJ, "cisbp_family_thresholds.tsv")
 if (!file.exists(THRESH))
   stop(sprintf(paste("Cis-BP thresholds not staged at %s.\n",
-       "Run this script once on node12 (which has outbound HTTPS) to download them;",
-       "defq compute nodes cannot reach cisbp.ccbr.utoronto.ca."), THRESH), call. = FALSE)
+       "This file is an EXTERNAL staged input: dataset/cisbp/00_fetch.sh downloads Cis-BP 3.10 and",
+       "dataset/cisbp/01_build_thresholds.py writes cisbp_family_thresholds.tsv (see dataset/cisbp/PROVENANCE.md);",
+       "copy it into objects/ before running. Compute nodes have no network."), THRESH), call. = FALSE)
 thr <- fread(THRESH)
 thr[, `:=`(t_cis = suppressWarnings(as.numeric(threshold_pct)),
            t_w14 = suppressWarnings(as.numeric(weirauch2014_threshold_pct)))]
 lic <- merge(lic, thr[, .(pfam_dbd, t_cis, t_w14)], by.x = "pfam", by.y = "pfam_dbd", all.x = TRUE)
+# gate then EXCLUDES those families; that exclusion was silent — now it is counted
+# (and IRF's literal 100 is a known Cis-BP failure code, applied as never-pass)
 cat(sprintf("  Cis-BP cutoffs: %d licensed pairs across %d families carry a non-numeric threshold (NA -> excluded by the cisbp gate)\n",
             lic[is.na(t_cis), .N], lic[is.na(t_cis), uniqueN(pfam)]))
 
+# ---- [8] Per-family gene trees -----------------------------------------------
+# -automated1 strips a full-length alignment to almost nothing (HLH: 5 columns over
+# 194 sequences), giving an uninformative tree that returns the whole family.
 cat("[TF 8] per-family DBD gene trees\n")
 fam_tab <- lic[, .(n_baits = uniqueN(acc), n_loci = uniqueN(locus)), by = pfam][n_baits >= 2 & n_loci >= 1]
+# rejects bootstrap-less placements anyway, and their loci still reach the bridge
+# through the RBH arm, which needs no tree.
 fam_small <- fam_tab[n_baits + n_loci < 4L]
 if (nrow(fam_small))
   cat(sprintf("  %d famil%s too small to bootstrap (< 4 sequences), no tree: %s\n",
@@ -914,6 +1281,7 @@ tree_rows <- rbindlist(lapply(fam_tab$pfam, function(f) {
   run("iqtree3", c("-s", shQuote(file.path(d, "aln.trim.faa")), "-m", "MFP", "-bb", "1000",
                    "-nt", NPROC, "-seed", "20260426", "-pre", shQuote(file.path(d, f)), "-quiet", "-redo"))
   tf <- file.path(d, paste0(f, ".treefile")); if (!file.exists(tf)) return(NULL)
+  # ancestor is only defined on a ROOTED tree. Midpoint root first.
   tr <- tryCatch(phangorn::midpoint(read.tree(tf), node.labels = "support"), error = function(e) NULL)
   if (is.null(tr)) return(NULL)
   nt <- length(tr$tip.label)
@@ -938,6 +1306,7 @@ tree_pairs <- unique(tree_ok[, .(acc = unlist(strsplit(baits, ";"))), by = locus
 cat(sprintf("  %d families, %d placements, %d passing the clade and support guard\n",
             uniqueN(tree_rows$pfam), nrow(tree_rows), nrow(tree_pairs)))
 
+# ---- [9] The gate -> the bridge ----------------------------------------------
 cat(sprintf("[9] applying the gate: homology=%s identity=%s\n", ORTH_HOMOLOGY, ORTH_IDENTITY))
 lic[, tree_ok := paste(acc, locus) %in% paste(tree_pairs$acc, tree_pairs$locus)]
 gate <- function(d, hom, idn) {
@@ -950,17 +1319,32 @@ kept[, evidence := fifelse(is_rbh == "yes", "rbh", "tree")]
 m_keep <- merge(m2a[nzchar(acc)], kept[, .(acc, locus, evidence, pid_dbd_L, pfam_dbd = pfam)],
                 by = "acc", allow.cartesian = TRUE)
 fw(m_keep[order(matrix_id, -pid_dbd_L)], file.path(DAT, "motif_to_dlaeve.tsv"))
-loci_by_m <- m_keep[, .(dlaeve_locus = paste(sort(unique(locus)), collapse = ";")), by = matrix_id]
+loci_by_m <- m_keep[, .(dlaeve_locus = paste(sort(unique(locus)), collapse = ";"),
+                        n_subunits_kept = uniqueN(acc)), by = matrix_id]
+n_sub <- m2a[nzchar(acc), .(n_subunits = uniqueN(acc)), by = matrix_id]
 bridge <- merge(unique(m2a[, .(motif_id = matrix_id, tf_name)]), loci_by_m,
                 by.x = "motif_id", by.y = "matrix_id", all.x = TRUE)
+bridge <- merge(bridge, n_sub, by.x = "motif_id", by.y = "matrix_id", all.x = TRUE)
 bridge[is.na(dlaeve_locus), dlaeve_locus := ""]
+bridge[is.na(n_subunits_kept), n_subunits_kept := 0L]
+# ORTH_DIMER: "any" keeps a multi-subunit matrix when >= 1 subunit passed; "both" needs all
+if (ORTH_DIMER == "both") bridge[n_subunits_kept < n_subunits, dlaeve_locus := ""]
 bridge[, has_ortholog := fifelse(nzchar(dlaeve_locus), "TRUE", "FALSE")]
-fw(bridge[order(motif_id), .(motif_id, tf_name, has_ortholog, dlaeve_locus)],
+n_dimer <- bridge[n_subunits > 1 & has_ortholog == "TRUE"]
+cat(sprintf("  heterodimer rule ORTH_DIMER = %s: %d kept multi-subunit matrices, %d of them with only one subunit passing\n",
+            ORTH_DIMER, nrow(n_dimer), sum(n_dimer$n_subunits_kept < n_dimer$n_subunits)))
+fw(bridge[order(motif_id), .(motif_id, tf_name, has_ortholog, dlaeve_locus, n_subunits, n_subunits_kept)],
    file.path(DAT, "jaspar_ortholog_bridge.tsv"))
 N_KEPT <- bridge[has_ortholog == "TRUE", .N]
 cat(sprintf("  BRIDGE: %d of %d matrices keep a D. laeve ortholog\n", N_KEPT, N_MATRIX))
 stopifnot(N_KEPT >= 20, nrow(bridge) == N_MATRIX)
 
+# ---- [9b] The D. laeve TF guide ----------------------------------------------
+# The bridge says WHICH motifs survive; the guide records WHY: one row per kept
+# motif -> locus (coordinates, symbol, DBD sequence, every filter's passing value).
+# chromosome filter is INHERITED, never re-implemented. The proteome covers the
+# whole assembly: a kept locus off chr1-31+mt stays, on_assembly=FALSE, never
+# silently dropped.
 cat("[TF 9b] the D. laeve TF guide\n")
 gff <- readRDS(file.path(PIPE, "01_genome_toolkit/objects/gff_chrmt.rds"))
 gene_gr <- gff[gff$type == "gene"]
@@ -994,6 +1378,7 @@ setcolorder(guide, c("motif_id", "tf_name", "jaspar_class", "tax_group", "acc",
                      "weirauch_threshold", "passes_cisbp", "dbd_seq_dlaeve"))
 setorder(guide, tf_name, motif_id, locus)
 fw(guide, file.path(DAT, "tf_dlaeve_guide.tsv"))
+# companion FASTA: the full protein sequence of every kept D. laeve TF
 hdr <- guide[, .(lab = sprintf("locus=%s symbol=%s jaspar=%s", locus[1],
                  fifelse(is.na(symbol[1]), locus[1], symbol[1]),
                  paste(sort(unique(tf_name)), collapse = ";"))), by = dlaeve_protein]
@@ -1006,6 +1391,9 @@ cat(sprintf("  GUIDE: %d motif-locus rows, %d loci, %d motifs; %d locus/loci off
             nrow(guide), uniqueN(guide$locus), uniqueN(guide$motif_id),
             uniqueN(guide[on_assembly == FALSE, locus])))
 
+# ---- [10] Figures ------------------------------------------------------------
+# funnel, per-family conservation and decision-grid FIGURES are retired, but their
+# TABLES are still written (counts feed the diagram; the grid records the decisions).
 cat("[TF 10] figures\n")
 unlink(list.files(FIGS, pattern = "^(figS2b_|figS_tf_)", full.names = TRUE))   # TF stems ONLY: 01_genome_toolkit's other supplementary figures must survive
 mot_with <- function(a) uniqueN(m2a[acc %in% a, matrix_id])
@@ -1042,6 +1430,10 @@ gr[, `:=`(hom_l = factor(HOM[hom], levels = rev(HOM)), rule_l = factor(RUL[rule]
 fw(gr[, .(homology = hom, identity_rule = rule, motifs = n, defensible, chosen)],
    file.path(DAT, "pwm_library_decision_grid.tsv"))
 
+# ---- [10a] Figure: the TF DBD family complement ------------------------------
+# accessory bait domains were never scanned and stay in tf_family_complement.tsv
+# (the retired first version drew them as if they were absent TF families). Count
+# LOCI, not proteins: a protein count inflates every family by isoform multiplicity.
 comp <- pd[, .(n_loci = uniqueN(locus)), by = .(pfam_dbd = pfam)]
 comp <- merge(comp, bd[, .(n_jaspar = uniqueN(query)), by = .(pfam_dbd = pfam)], by = "pfam_dbd", all = TRUE)
 comp[is.na(n_loci), n_loci := 0L][is.na(n_jaspar), n_jaspar := 0L]
@@ -1056,6 +1448,8 @@ dbd_comp[, status := fifelse(n_loci == 0L, "Not detected in the proteome",
 setorder(dbd_comp, n_loci)
 dbd_comp[, pfam_dbd := factor(pfam_dbd, levels = pfam_dbd)]
 n_present <- dbd_comp[n_loci > 0, .N]
+# A log axis has no zero, so absent families sit at a marked position left of 1,
+# drawn as open circles and labelled 0.
 dbd_comp[, x_plot := fifelse(n_loci == 0L, 0.72, as.numeric(n_loci))]
 figD <- ggplot(dbd_comp, aes(y = pfam_dbd)) +
   geom_segment(data = dbd_comp[n_loci > 0], aes(x = 1, xend = n_loci, yend = pfam_dbd),
@@ -1081,6 +1475,9 @@ save_supp(figD, "figS_tf_tf_family_complement", 7.0, 9.6)
 cat(sprintf("  DBD family complement: %d of %d class-expected families present, %d TF loci total\n",
             n_present, nrow(dbd_comp), uniqueN(pd$locus)))
 
+# ---- [10b] Figure: the method as a workflow diagram --------------------------
+# What each stage asks, which tool answers it, how many motifs survive. Counts come
+# from `fun`, so the diagram cannot drift from the numbers this run actually produced.
 wf <- data.table(
   step  = 1:10,
   title = c("JASPAR CORE, four animal groups",
@@ -1099,7 +1496,8 @@ wf <- data.table(
             "JASPAR structural class to Pfam map", "MAFFT, identities / longer domain",
             sprintf("%s thresholds", if (ORTH_IDENTITY == "cisbp") "Cis-BP 3.10" else "Weirauch 2014"),
             sprintf("%s + %s", ORTH_HOMOLOGY, ORTH_IDENTITY)),
-  n     = c(fun$n[1], fun$n[2], fun$n[3], NA, NA, fun$n[6], NA, NA, fun$n[7], fun$n[8]))
+  n     = c(fun$n[1], fun$n[2], fun$n[3], NA, fun$n[5], fun$n[4], fun$n[6], NA, fun$n[7], fun$n[8]))
+# leaves the background TRANSPARENT, which many viewers paint black: set white explicitly.
 wf[, yc := -as.numeric(step)]
 wf[, lab := ifelse(is.na(n), "", format(n, big.mark = ","))]
 wf[, fill := fifelse(step == 1L, "grey85", fifelse(step == 10L, "#CDEBDF", "grey93"))]
@@ -1130,5 +1528,6 @@ cat("[01_genome_toolkit TF-annotation section] done\n")
 
 })
 
+# ---- [9] Reproducibility: record the exact package versions this run used ----
 writeLines(capture.output(sessionInfo()), file.path(BATCH, "sessionInfo_01_genome_toolkit.txt"))
 cat("[01_genome_toolkit] done\n")

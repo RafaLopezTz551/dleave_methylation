@@ -9,6 +9,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%x_%j.log
 
+# silently depended on the submitting user's ~/.bashrc R_LIBS export.
 export R_LIBS="/mnt/data/alfredvar/rlopezt/rlib:/mnt/data/alfredvar/jmiranda/80-scripts/88-R-packages"
 set -euo pipefail
 export SCRATCH_JOB="/scratch/groups/alfredvar/$USER/job_$SLURM_JOB_ID"
