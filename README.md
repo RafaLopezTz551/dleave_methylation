@@ -20,14 +20,14 @@ lower numbered modules only and writes only into its own folder (`data/` tables,
 | Folder | Question | Paper figures |
 |---|---|---|
 | `00_preprocessing/` | raw reads → Bismark CpG reports, HTSeq counts, HiFi pileups (documentation + the run scripts) | — |
-| `01_genome_toolkit/` | genome composition, CpG depletion across molluscs, methylation toolkit, tail differential expression, and the TF motif library by sequence orthology | Fig. 1; S1, S2, S18, S19; S12A |
+| `01_genome_toolkit/` | genome composition, CpG depletion across molluscs, methylation toolkit, tail differential expression, and the TF motif library by sequence orthology | Fig. 1; S1, S2, S10B, S14, S15 |
 | `02_landscape/` | the baseline methylome: global level, compartments, HiFi agreement, gene body methylation vs expression | Figs. 2, 3; S3–S6 |
-| `03_promoters/` | Weber promoter classes, human control, promoter motifs and GO by class, the same classes in four more species | Figs. 4, 5; S7–S9 |
-| `04_TEs/` | transposable element methylation (HiFi bodywall main, WGBS tail supplementary) | Fig. 6; S10 |
-| `05_differential/` | DSS DMPs and DMRs, their annotation and GO, the label swap null | Fig. 7; S11, S12B |
-| `06_decoupling/` | methylation change vs expression change on three axes | Fig. 8; S13 |
-| `07_wgcna/` | coexpression modules and where methylation change concentrates | Fig. 9; S14, S15 |
-| `08_motifs/` | UMR/LMR segmentation, motif enrichment, LMR bin QC | Fig. 10; S16, S17 |
+| `03_promoters/` | Weber promoter classes, human control, promoter methylation and GO by class | Figs. 4, 5B–C; S7 |
+| `04_TEs/` | transposable element methylation (HiFi bodywall main, WGBS tail supplementary) | Fig. 6; S9 |
+| `05_differential/` | DSS DMPs and DMRs, their annotation and GO, the label swap null | Figs. 7, 8A; S10A; Table S1 |
+| `06_decoupling/` | methylation change vs expression change | S11 |
+| `07_wgcna/` | coexpression modules and where methylation change concentrates | Fig. 9; S12 |
+| `08_motifs/` | UMR/LMR segmentation, motif enrichment by Weber class and at UMRs/LMRs | Figs. 5A, 10; S8, S13 |
 | `environment/` | modules, R package versions (sessionInfo per module) | |
 | `data/` | small derived tables quoted in the paper; large files are pointed to SRA/GEO | |
 
