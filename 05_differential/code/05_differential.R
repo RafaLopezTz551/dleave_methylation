@@ -9,7 +9,7 @@ suppressPackageStartupMessages({
 
 # ---- [0] Setup: paths, palettes, theme, savers ------------------------------
 # Pinned versions (validated under R 4.4.1 / Bioconductor 3.20, /opt/apps/r/4.4.1-studio):
-#   data.table 1.18.2.1  GenomicRanges 1.58.0  IRanges 2.40.1  bsseq 1.42.0  DSS 2.54.0
+#   data.table 1.18.4  GenomicRanges 1.58.0  IRanges 2.40.1  bsseq 1.42.0  DSS 2.54.0
 #   ggplot2 4.0.2  scales 1.4.0  patchwork 1.3.2  ggrepel 0.9.6  hexbin 1.28.5
 #   clusterProfiler 4.14.6  VennDiagram 1.8.2  svglite 2.2.2
 # The machine-checkable record is written to sessionInfo_05_differential.txt at the end (§13).
@@ -81,6 +81,9 @@ cat("[2] DSS DMLtest (per chromosome — memory-safe) + callDML/callDMR\n")
 # a chromosome boundary, so per-chromosome DMLtest is IDENTICAL but caps peak memory;
 # each chr is cached -> resumable. _chrmt caches = the 32-sequence universe (the old
 dml_rds <- file.path(OBJ, "dmltest_chrmt.rds")
+BS_MTIME <- file.mtime(file.path(B02, "bsseq_cov5_chrmt.rds"))
+if (file.exists(dml_rds) && file.mtime(dml_rds) < BS_MTIME)
+  stop("objects/dmltest_chrmt.rds is OLDER than the bsseq object it was computed from: delete the dmltest_* caches and rerun", call. = FALSE)
 if (file.exists(dml_rds)) dml_test <- readRDS(dml_rds) else {
   chrs <- intersect(keep_chr, as.character(unique(seqnames(bs))))
   dml_list <- lapply(chrs, function(ch) {
@@ -102,78 +105,6 @@ dmrs <- if (is.null(dmrs_raw)) data.table() else as.data.table(dmrs_raw)
 dmps[, direction := ifelse(diff < 0, "Hyper", "Hypo")]
 if (nrow(dmrs)) dmrs[, direction := ifelse(diff.Methy < 0, "Hyper", "Hypo")]
 cat(sprintf("  DMPs %s | DMRs %s\n", format(nrow(dmps), big.mark=","), format(nrow(dmrs), big.mark=",")))
-
-# ---- [2b] Label-swap null: the identical DSS test on the two mislabelled 2-vs-2 splits --
-# when the labels carry NO biology? The two possible swaps pair one control with one
-# amputated animal on each side ({C1,A1} vs {C2,A2}; {C1,A2} vs {C2,A1}); the 1-vs-1
-# pairs live in analysis/pairwise_dml. Same CpG universe (cov >= 5 in all four), same
-# per-chromosome smoothed DMLtest, same callDML/callDMR thresholds as [2]; each swap is
-# cached per chromosome like the real contrast (objects/dmltest_<swap>_chrmt_<chr>.rds),
-# so a fresh run needs the 128G launcher (an uncached DMLtest peaks near 40G per contrast).
-cat("[2b] label-swap null (same DSS settings on the two mislabelled 2-vs-2 splits)\n")
-run_dss <- function(g1, g2, tag) {
-  rds <- file.path(OBJ, sprintf("dmltest_%s_chrmt.rds", tag))
-  if (file.exists(rds)) return(readRDS(rds))
-  chrs <- intersect(keep_chr, as.character(unique(seqnames(bs))))
-  dl <- lapply(chrs, function(ch) {
-    cf <- file.path(OBJ, sprintf("dmltest_%s_chrmt_%s.rds", tag, ch))
-    if (file.exists(cf)) return(readRDS(cf))
-    cat(sprintf("  DMLtest %s %s\n", tag, ch))
-    r <- DMLtest(bs[as.character(seqnames(bs)) == ch, ], group1 = g1, group2 = g2, smoothing = TRUE)
-    saveRDS(r, cf); r
-  })
-  d <- do.call(rbind, dl); saveRDS(d, rds); d
-}
-swaps <- list(real  = list(g1 = c("C1", "C2"), g2 = c("A1", "A2")),
-              swapA = list(g1 = c("C1", "A1"), g2 = c("C2", "A2")),
-              swapB = list(g1 = c("C1", "A2"), g2 = c("C2", "A1")))
-swap_keys <- list(); swap_rows <- list()
-for (nm in names(swaps)) {
-  d <- if (nm == "real") dml_test else run_dss(swaps[[nm]]$g1, swaps[[nm]]$g2, nm)
-  # STAT TEST: identical to [2] -- DSS callDML (p < 0.05, |delta| >= 0.10) and callDMR
-  # (p < 0.05, delta 0.10, minlen 50, minCG 3) on the smoothed per-chromosome DMLtest.
-  p <- as.data.table(callDML(d, p.threshold = 0.05, delta = 0.10))
-  r <- callDMR(d, p.threshold = 0.05, delta = 0.10, minlen = 50, minCG = 3)
-  r <- if (is.null(r)) data.table() else as.data.table(r)
-  swap_keys[[nm]] <- p[, paste(chr, pos)]
-  swap_rows[[nm]] <- data.table(
-    contrast = nm, group1 = paste(swaps[[nm]]$g1, collapse = "+"), group2 = paste(swaps[[nm]]$g2, collapse = "+"),
-    n_dmp = nrow(p), n_dmp_group2_higher = sum(p$diff < 0), n_dmp_group2_lower = sum(p$diff > 0),
-    n_dmr = nrow(r), n_dmr_group2_higher = if (nrow(r)) sum(r$diff.Methy < 0) else 0L,
-    n_dmr_group2_lower = if (nrow(r)) sum(r$diff.Methy > 0) else 0L)
-  if (nm != "real") rm(d); invisible(gc())
-}
-swap_tab <- rbindlist(swap_rows)
-real_key <- swap_keys$real
-swap_tab[, real_dmps_recovered := vapply(contrast, function(nm) sum(real_key %in% swap_keys[[nm]]), numeric(1))]
-swap_tab[, frac_real_dmps_recovered := real_dmps_recovered / length(real_key)]
-swap_tab[, frac_real_dmps_in_either_swap := mean(real_key %in% c(swap_keys$swapA, swap_keys$swapB))]
-fwrite(swap_tab, file.path(DAT, "label_swap_counts.tsv"), sep = "\t")
-cat("  contrast  DMPs (g2 higher / lower)   DMRs (g2 higher / lower)   real DMPs recovered\n")
-for (i in seq_len(nrow(swap_tab))) with(swap_tab[i], cat(sprintf(
-  "  %-7s %8s (%s / %s)   %6s (%s / %s)   %s (%.1f%%)\n", contrast, format(n_dmp, big.mark = ","),
-  format(n_dmp_group2_higher, big.mark = ","), format(n_dmp_group2_lower, big.mark = ","),
-  format(n_dmr, big.mark = ","), n_dmr_group2_higher, n_dmr_group2_lower,
-  format(real_dmps_recovered, big.mark = ","), 100 * frac_real_dmps_recovered)))
-cat(sprintf("  real DMPs called by either swap: %.1f%%\n", 100 * swap_tab$frac_real_dmps_in_either_swap[1]))
-# fig5n (supp): the three contrasts side by side, DMPs and DMRs, split by direction
-sw_long <- data.table::melt(swap_tab[, .(contrast, `DMPs, group 2 higher` = n_dmp_group2_higher, `DMPs, group 2 lower` = n_dmp_group2_lower,
-                                         `DMRs, group 2 higher` = n_dmr_group2_higher, `DMRs, group 2 lower` = n_dmr_group2_lower)],
-                            id.vars = "contrast", variable.name = "what", value.name = "n")   # namespaced (masked-generic rule)
-sw_long[, `:=`(feature = ifelse(grepl("^DMP", what), "DMPs", "DMRs"),
-               direction = ifelse(grepl("higher", what), "Group 2 higher", "Group 2 lower"))]
-sw_long[, contrast := factor(contrast, levels = c("real", "swapA", "swapB"),
-                             labels = c("Control vs amputated\n(C1+C2 vs A1+A2)", "Swap A\n(C1+A1 vs C2+A2)", "Swap B\n(C1+A2 vs C2+A1)"))]
-p_sw <- ggplot(sw_long, aes(contrast, n, fill = direction)) +
-  geom_col(width = 0.65) +
-  geom_text(aes(label = format(n, big.mark = ",")), position = position_stack(vjust = 0.5), size = 2.3, colour = "white") +
-  facet_wrap(~ feature, scales = "free_y") +
-  scale_fill_manual(values = c(`Group 2 higher` = COL_DIR[["Hyper"]], `Group 2 lower` = COL_DIR[["Hypo"]]), name = NULL) +
-  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.05))) +
-  labs(x = NULL, y = "Count", title = "Label-swap null: the same DSS test on mislabelled 2-vs-2 splits") +
-  theme_pub() + theme(strip.background = element_blank(), axis.text.x = element_text(size = 7),
-                      plot.title = element_text(size = rel(1)))
-save_supp(p_sw, "fig5n_label_swap_null", 6.4, 3.0)
 
 # ---- [3] Region annotation + primary multi-gene assignment ------------------
 # Region label precedence: Promoter > Exon > Intron > Intergenic.
@@ -498,6 +429,7 @@ run_enr <- function(sig, cat_label) {                  # one category ORA
   uni <- unique(sub$gene_id)
   hit <- intersect(sig, uni)
   if (length(hit) < 5) return(data.table())
+  # STAT TEST: hypergeometric over-representation (clusterProfiler::enricher), BH within category
   res <- enricher(gene = hit, universe = uni,
                   TERM2GENE = sub[, .(term, gene_id)],
                   TERM2NAME = unique(sub[, .(term, description)]),
@@ -540,11 +472,12 @@ go_dotplot_main <- function(all_enr, kind, name, n_top = 18, supp = FALSE) {
                       levels = rev(make.unique(sprintf("%s (%s)", Description, ontology))))]
   p <- ggplot(top, aes(FoldEnrichment, lab, colour = p.adjust, size = Count)) +
     geom_point() +
-    scale_colour_gradient(low = "#C0392B", high = "#2471A3", name = "BH FDR",
+    scale_colour_gradient(low = "#C0392B", high = "#2471A3", name = "BH FDR", limits = c(0, 1), oob = scales::squish,
                           guide = guide_colorbar(reverse = TRUE)) +
     scale_size_continuous(range = c(2, 8), name = "Genes enriched") +
     labs(x = "Fold enrichment (observed / expected)", y = NULL,
-         title = sprintf("%s gene GO and KEGG enrichment", kind)) +
+         title = sprintf("%s gene GO and KEGG enrichment", kind),
+         subtitle = sprintf("%d of %d terms at FDR < 0.05", sum(go$p.adjust < 0.05), nrow(go))) +   # a null panel reads as null
     theme_pub() + theme(axis.text.y = element_text(size = 9))
   (if (supp) save_supp else save_fig)(p, name, 7.0, 4.4)   # same style, main or supp;
 }
@@ -554,8 +487,10 @@ go_dotplot_main <- function(all_enr, kind, name, n_top = 18, supp = FALSE) {
 # dropped. Gene sets = gene-assigned features only (gene_id not NA).
 dmp_enr <- enrich_all(unique(dmp_genes$gene_id), "DMP")
 go_dotplot_main(dmp_enr, "DMP", "fig5h_dmp_go_dotplot")
-go_dotplot_main(enrich_all(unique(dmp_genes[direction == "Hyper", gene_id]), "DMP hyper"), "DMP hyper", "fig5h_dmp_hyper_go", supp = TRUE)
-go_dotplot_main(enrich_all(unique(dmp_genes[direction == "Hypo",  gene_id]), "DMP hypo"),  "DMP hypo",  "fig5h_dmp_hypo_go",  supp = TRUE)
+dmp_hyper_enr <- enrich_all(unique(dmp_genes[direction == "Hyper", gene_id]), "DMP hyper")
+go_dotplot_main(dmp_hyper_enr, "DMP hyper", "fig5h_dmp_hyper_go", supp = TRUE)
+dmp_hypo_enr <- enrich_all(unique(dmp_genes[direction == "Hypo",  gene_id]), "DMP hypo")
+go_dotplot_main(dmp_hypo_enr,  "DMP hypo",  "fig5h_dmp_hypo_go",  supp = TRUE)
 if (nrow(dmr_genes)) {
   dmr_enr <- enrich_all(unique(dmr_genes$gene_id), "DMR")
   # term reaches FDR < 0.05 (min 0.20), so a MAIN dotplot contradicted the Results text;
@@ -565,15 +500,22 @@ if (nrow(dmr_genes)) {
   go_dotplot_main(enrich_all(unique(dmr_genes[direction == "Hypo",  gene_id]), "DMR hypo"),  "DMR hypo",  "fig5i_dmr_hypo_go",  supp = TRUE)
 }
 
-# ---- [7c] Target-size adjusted GO/KEGG (GOseq, Wallenius) --------------------
+# ---- [7c] Target-size adjusted GO/KEGG: the GOmeth procedure (goseq, Wallenius) ----
 # Longer genes carry more analysed CpGs and collect DMPs by target size alone (2.5% of
 # the shortest gene quintile carries a DMP against 28.3% of the longest). The
 # hypergeometric ORA above has no stratified form, so every DMP/DMR gene set is
-# re-tested with GOseq (Young et al. 2010): a Wallenius non-central hypergeometric test
-# whose per-gene bias is the number of analysed CpGs over the SAME target the features
-# were assigned to (gene body + 2 kb upstream); gene length is the sensitivity bias.
+# re-tested with the GOmeth procedure of missMethyl (Phipson 2016; Maksimovic 2021), the
+# methylation form of the GOseq selection-bias correction (Young 2010): a Wallenius
+# non-central hypergeometric test whose per-gene bias is the number of analysed CpGs over
+# the SAME target the features were assigned to (gene body + 2 kb upstream). Implemented
+# with the goseq package because missMethyl's annotation objects are array specific;
+# gene length is the sensitivity bias.
 # Universes, term-size window (5..500) and BH families mirror run_enr(), so the FDR
-cat("[7c] GOseq target-size adjusted enrichment (Wallenius; bias = analysed CpGs per gene target)\n")
+cat("[7c] GOmeth target-size adjusted enrichment (goseq Wallenius; bias = analysed CpGs per gene target)\n")
+lq <- data.table(gene_id = gid_of_gene, len = width(gene_gr))[, lenq := cut(len, quantile(len, seq(0, 1, 0.2)), include.lowest = TRUE, labels = FALSE)]
+lq[, has_dmp := gene_id %in% dmp_genes$gene_id]
+fwrite(lq[, .(n_genes = .N, median_len = as.numeric(median(len)), pct_with_dmp = 100 * mean(has_dmp)), by = lenq][order(lenq)],
+       file.path(DAT, "dmp_share_by_length_quintile.tsv"), sep = "\t")   # the 2.5% -> 28% gradient that motivates the adjustment
 suppressPackageStartupMessages(library(goseq))
 tgt_gr <- GRanges(seqnames(gene_gr),
                   IRanges(pmax(1L, pmin(start(gene_gr), start(prom_gr))), pmax(end(gene_gr), end(prom_gr))))
@@ -589,9 +531,10 @@ run_goseq <- function(sig, cat_label, bias) {
   # function fitted on the per-gene bias covariate; BH within the category.
   pwf <- nullp(vec, bias.data = pmax(bias[uni], 1), plot.fit = FALSE)
   res <- goseq(pwf, gene2cat = as.data.frame(sub[, .(gene_id, term)]),
-               method = "Wallenius", use_genes_without_cat = FALSE)
+               method = "Wallenius", use_genes_without_cat = TRUE)   # universe = every annotated gene, as in enricher
   dt <- as.data.table(res)[, .(term = category, p = over_represented_pvalue,
                                n_hit = numDEInCat, n_term = numInCat)]
+  dt <- dt[n_hit >= 1]                      # same BH family as enricher (terms with >= 1 hit gene)
   dt[, fdr := p.adjust(p, "BH")]
   merge(dt, unique(sub[, .(term, description)]), by = "term")
 }
@@ -612,8 +555,8 @@ goseq_set <- function(sig, base, tag) {
 }
 goseq_sets <- list(
   dmp = goseq_set(unique(dmp_genes$gene_id), dmp_enr, "dmp"),
-  dmp_hyper = goseq_set(unique(dmp_genes[direction == "Hyper", gene_id]), data.table(), "dmp_hyper"),
-  dmp_hypo  = goseq_set(unique(dmp_genes[direction == "Hypo",  gene_id]), data.table(), "dmp_hypo"))
+  dmp_hyper = goseq_set(unique(dmp_genes[direction == "Hyper", gene_id]), dmp_hyper_enr, "dmp_hyper"),
+  dmp_hypo  = goseq_set(unique(dmp_genes[direction == "Hypo",  gene_id]), dmp_hypo_enr, "dmp_hypo"))
 if (nrow(dmr_genes)) goseq_sets$dmr <- goseq_set(unique(dmr_genes$gene_id), dmr_enr, "dmr")
 goseq_summary <- rbindlist(lapply(names(goseq_sets), function(nm) {
   d <- goseq_sets[[nm]]
@@ -694,6 +637,7 @@ bt_rows <- rbindlist(lapply(c("DMP", "DMR"), function(k) {
   hit <- if (k == "DMP") unique(dmp_genes$gene_id) else unique(dmr_genes$gene_id)
   d <- copy(bt_ann)[, has := gene_id %in% hit]
   d[, lenq := cut(len, quantile(len, seq(0, 1, 0.2)), include.lowest = TRUE, labels = FALSE)]
+  # STAT TEST: two-sided Fisher (raw) and Cochran-Mantel-Haenszel common OR stratified by gene-length quintile
   raw <- fisher.test(table(d$biotype, d$has))
   cmh <- mantelhaen.test(table(d$biotype, d$has, d$lenq))
   data.table(set = k, n_protein_coding = d[biotype == "protein_coding" & has, .N],
@@ -788,7 +732,7 @@ cat(sprintf("  expected %.1f | observed %d | fold %.2fx | p = %.4f\n",
 cls <- c("DNA", "LINE", "LTR", "SINE", "RC")
 enr <- rbindlist(lapply(c("All TEs", cls), function(k) {
   tgt <- if (k == "All TEs") te_in_gene else intersect(reduce(te_gr[te_gr$class == k]), gene_uni)
-  r <- perm_test(dmr_gr[in_gene], tgt)
+  r <- if (k == "All TEs") ov_all else perm_test(dmr_gr[in_gene], tgt)   # one draw shared by the log, fig5m and this table
   data.table(class = k, n_dmr = r$n, observed = r$obs, expected = round(r$exp, 1),
              fold = round(r$fold, 2), p = r$p,
              pct_gene_bp = round(100*sum(width(tgt))/sum(width(gene_uni)), 2))
@@ -852,6 +796,7 @@ run_enr_uni <- function(sig, cat_label, universe) {         # ORA with a custom 
   uni <- intersect(universe, unique(sub$gene_id))
   hit <- intersect(sig, uni)
   if (length(hit) < 5) return(data.table())
+  # STAT TEST: hypergeometric over-representation (clusterProfiler::enricher) on a custom universe
   res <- suppressWarnings(enricher(gene = hit, universe = uni,
                   TERM2GENE = sub[, .(term, gene_id)],
                   TERM2NAME = unique(sub[, .(term, description)]),
@@ -895,6 +840,91 @@ p_cls <- ggplot(enr, aes(fold, lab, fill = fdr < 0.05)) +
        title = "By TE class") + theme_pub()
 save_supp(p_null / p_cls + plot_layout(heights = c(1.3, 1)),
           "fig5m_dmr_te_gene_body", 6.0, 6.0)
+
+# ---- [2b] Label-swap null: the identical DSS test on the two mislabelled 2-vs-2 splits --
+# when the labels carry NO biology? The two possible swaps pair one control with one
+# amputated animal on each side ({C1,A1} vs {C2,A2}; {C1,A2} vs {C2,A1}); the 1-vs-1
+# pairs live in analysis/pairwise_dml. Same CpG universe (cov >= 5 in all four), same
+# per-chromosome smoothed DMLtest, same callDML/callDMR thresholds as [2]; each swap is
+# cached per chromosome like the real contrast (objects/dmltest_<swap>_chrmt_<chr>.rds),
+# so a fresh run needs the 128G launcher (an uncached DMLtest peaks near 40G per contrast).
+cat("[2b] label-swap null (same DSS settings on the two mislabelled 2-vs-2 splits)\n")
+run_dss <- function(g1, g2, tag) {
+  rds <- file.path(OBJ, sprintf("dmltest_%s_chrmt.rds", tag))
+  if (file.exists(rds) && file.mtime(rds) < BS_MTIME) stop(sprintf("%s is older than the bsseq object: delete it and rerun", basename(rds)), call. = FALSE)
+  if (file.exists(rds)) return(readRDS(rds))
+  chrs <- intersect(keep_chr, as.character(unique(seqnames(bs))))
+  dl <- lapply(chrs, function(ch) {
+    cf <- file.path(OBJ, sprintf("dmltest_%s_chrmt_%s.rds", tag, ch))
+    if (file.exists(cf)) return(readRDS(cf))
+    cat(sprintf("  DMLtest %s %s\n", tag, ch))
+    r <- DMLtest(bs[as.character(seqnames(bs)) == ch, ], group1 = g1, group2 = g2, smoothing = TRUE)
+    saveRDS(r, cf); r
+  })
+  d <- do.call(rbind, dl); saveRDS(d, rds); d
+}
+swaps <- list(real  = list(g1 = c("C1", "C2"), g2 = c("A1", "A2")),
+              swapA = list(g1 = c("C1", "A1"), g2 = c("C2", "A2")),
+              swapB = list(g1 = c("C1", "A2"), g2 = c("C2", "A1")))
+swap_keys <- list(); swap_rows <- list()
+for (nm in names(swaps)) {
+  d <- if (nm == "real") dml_test else run_dss(swaps[[nm]]$g1, swaps[[nm]]$g2, nm)
+  # STAT TEST: identical to [2] -- DSS callDML (p < 0.05, |delta| >= 0.10) and callDMR
+  # (p < 0.05, delta 0.10, minlen 50, minCG 3) on the smoothed per-chromosome DMLtest.
+  p <- as.data.table(callDML(d, p.threshold = 0.05, delta = 0.10))
+  r <- callDMR(d, p.threshold = 0.05, delta = 0.10, minlen = 50, minCG = 3)
+  r <- if (is.null(r)) data.table() else as.data.table(r)
+  swap_keys[[nm]] <- p[, paste(chr, pos)]
+  swap_rows[[nm]] <- data.table(
+    contrast = nm, group1 = paste(swaps[[nm]]$g1, collapse = "+"), group2 = paste(swaps[[nm]]$g2, collapse = "+"),
+    n_dmp = nrow(p), n_dmp_group2_higher = sum(p$diff < 0), n_dmp_group2_lower = sum(p$diff > 0),
+    n_dmr = nrow(r), n_dmr_group2_higher = if (nrow(r)) sum(r$diff.Methy < 0) else 0L,
+    n_dmr_group2_lower = if (nrow(r)) sum(r$diff.Methy > 0) else 0L)
+  if (nm != "real") rm(d); invisible(gc())
+}
+swap_tab <- rbindlist(swap_rows)
+real_key <- swap_keys$real
+swap_tab[, real_dmps_recovered := vapply(contrast, function(nm) sum(real_key %in% swap_keys[[nm]]), numeric(1))]
+swap_tab[, frac_real_dmps_recovered := real_dmps_recovered / length(real_key)]
+swap_tab[, frac_real_dmps_in_either_swap := mean(real_key %in% c(swap_keys$swapA, swap_keys$swapB))]
+fwrite(swap_tab, file.path(DAT, "label_swap_counts.tsv"), sep = "\t")
+cat("  contrast  DMPs (g2 higher / lower)   DMRs (g2 higher / lower)   real DMPs recovered\n")
+for (i in seq_len(nrow(swap_tab))) with(swap_tab[i], cat(sprintf(
+  "  %-7s %8s (%s / %s)   %6s (%s / %s)   %s (%.1f%%)\n", contrast, format(n_dmp, big.mark = ","),
+  format(n_dmp_group2_higher, big.mark = ","), format(n_dmp_group2_lower, big.mark = ","),
+  format(n_dmr, big.mark = ","), n_dmr_group2_higher, n_dmr_group2_lower,
+  format(real_dmps_recovered, big.mark = ","), 100 * frac_real_dmps_recovered)))
+cat(sprintf("  real DMPs called by either swap: %.1f%%\n", 100 * swap_tab$frac_real_dmps_in_either_swap[1]))
+# fig5n (supp): the three contrasts side by side, DMPs and DMRs, split by direction
+sw_long <- data.table::melt(swap_tab[, .(contrast, `DMPs, group 2 higher` = n_dmp_group2_higher, `DMPs, group 2 lower` = n_dmp_group2_lower,
+                                         `DMRs, group 2 higher` = n_dmr_group2_higher, `DMRs, group 2 lower` = n_dmr_group2_lower)],
+                            id.vars = "contrast", variable.name = "what", value.name = "n")   # namespaced (masked-generic rule)
+sw_long[, `:=`(feature = ifelse(grepl("^DMP", what), "DMPs", "DMRs"),
+               direction = ifelse(grepl("higher", what), "Group 2 higher", "Group 2 lower"))]
+sw_long[, contrast := factor(contrast, levels = c("real", "swapA", "swapB"),
+                             labels = c("C1+C2 vs A1+A2\n(true labels)", "C1+A1 vs C2+A2\n(swap A)", "C1+A2 vs C2+A1\n(swap B)"))]
+p_sw <- ggplot(sw_long, aes(contrast, n, fill = direction)) +
+  geom_col(width = 0.65) +
+  geom_text(data = function(d) d[n > 0], aes(label = scales::comma(n)), position = position_stack(vjust = 0.5), size = 2.3, colour = "white") +
+  facet_wrap(~ feature, scales = "free_y") +
+  scale_fill_manual(values = c(`Group 2 higher` = COL_DIR[["Hyper"]], `Group 2 lower` = COL_DIR[["Hypo"]]), name = NULL) +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.05))) +
+  labs(x = NULL, y = "Count", title = "Label-swap null: the same DSS test on mislabelled 2-vs-2 splits") +
+  theme_pub() + theme(strip.background = element_blank(), axis.text.x = element_text(size = 7),
+                      legend.position = "bottom", plot.title = element_text(size = rel(1)))
+save_supp(p_sw, "fig5n_label_swap_null", 7.2, 3.4)
+
+# ---- [12c] Argonaute loci: differential methylation (TEXT result, Discussion) --
+# Rule 4: the census itself is 01_genome_toolkit's (argonaute_census.tsv); the DMP/DMR
+# counts per locus are this module's, so the Discussion sentence on the PIWI/AGO genes
+# ("neither carries a differentially methylated region") is produced here.
+ago <- fread(file.path(PIPE, "01_genome_toolkit/data/argonaute_census.tsv"))
+ago[, n_dmp := vapply(gene_id, function(g) dmp_genes[gene_id == g, .N], integer(1))]
+ago[, n_dmr := vapply(gene_id, function(g) if (nrow(dmr_genes)) dmr_genes[gene_id == g, .N] else 0L, integer(1))]
+fwrite(ago[, .(gene_id, clade, gff_symbol, kept, baseMean, log2FoldChange, padj, n_dmp, n_dmr)],
+       file.path(DAT, "argonaute_methylation.tsv"), sep = "\t")
+cat(sprintf("  Argonaute loci: %s\n",
+            paste(ago[kept == TRUE, sprintf("%s (%s) DMPs %d DMRs %d", gff_symbol, clade, n_dmp, n_dmr)], collapse = "; ")))
 
 # ---- [13] Reproducibility: record the exact package versions this run used --
 writeLines(capture.output(sessionInfo()), file.path(BATCH, "sessionInfo_05_differential.txt"))

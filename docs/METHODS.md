@@ -37,6 +37,10 @@ size.
   and UFBoot2, midpoint rooted) as a second line of evidence. The deliverable is
   `data/jaspar_ortholog_bridge.tsv` (one row per JASPAR matrix, `has_ortholog` and the locus)
   and `data/tf_dlaeve_guide.tsv`; `08_motifs` reads the bridge by path.
+* **Argonaute census**: every chromosome filtered locus whose eggNOG annotation carries the
+  Pfam Piwi domain, best scoring isoform per locus, kept at the toolkit rule (a Preferred
+  name and bit score ≥ 60), assigned to the PIWI or AGO clade by name, with tail baseMean,
+  log2 fold change and adjusted P from the DE table (`argonaute_census.tsv`).
 
 ## 02_landscape — the baseline methylome
 * **Inputs**: four Bismark CpG reports; the GFF object from module 01; HTSeq counts (tail and
@@ -59,15 +63,11 @@ size.
   figures plot the whole promoter O/E.
 * **Human control**: identical classifier on GRCh38 RefSeq protein coding promoters (primary
   chromosomes); the Weber 2007 split is reproduced.
-* Promoter methylation by class (pooled β over the 2 kb upstream window), TSS metagenes by
+* Promoter methylation by class (pooled β over the -1,300/+200 classifier window), TSS metagenes by
   class, expression versus promoter methylation by class (Spearman), Gene Ontology and KEGG
   overrepresentation per class (clusterProfiler `enricher` with STRING v12 terms for
   *D. laeve*, `enrichGO` + cached KEGG for human; universe = classified genes carrying an
   annotation in the category tested), and the AP-2 domain architecture.
-* **Cross species classes (reviewer control)**: the same classifier on the RefSeq protein
-  coding genes of *Aplysia californica*, *Pomacea canaliculata*, *Octopus bimaculoides* and
-  *Drosophila melanogaster*; GO per class from each species' STRING v12 term file (GeneID →
-  STRING protein through the alias table; *Aplysia* is not in STRING v12).
 
 ## 04_TEs — transposable element methylation
 * Per copy methylation of the five classified repeat classes (LINE, LTR, DNA, RC, SINE) on
@@ -92,6 +92,16 @@ size.
 * **Label swap null (reviewer control)**: the identical DSS procedure on the two mislabelled
   two versus two splits (C1+A1 vs C2+A2; C1+A2 vs C2+A1); counts and the fraction of true
   label DMPs recovered are in `data/label_swap_counts.tsv`.
+* **Target size adjusted re-test (GOmeth)**: every DMP/DMR gene set is re-tested with the
+  GOmeth procedure (missMethyl; the methylation form of the GOseq selection bias correction),
+  implemented with goseq 1.58.0: a Wallenius non central hypergeometric test whose per gene
+  bias is the number of analysed CpGs over the same target the features were assigned to
+  (gene body plus 2 kb upstream), universe equal to the enricher universe, BH over the terms
+  with at least one hit gene; gene length is run as a sensitivity bias. `data/goseq_*.tsv` and
+  `goseq_summary.tsv` report, per set, the enricher significant terms and how many survive.
+  `dmp_share_by_length_quintile.tsv` gives the share of genes carrying a DMP per length quintile.
+* **Argonaute loci**: the DMP and DMR counts of the PIWI/AGO loci listed by module 01
+  (`argonaute_methylation.tsv`).
 
 ## 06_decoupling — methylation change versus expression change
 * Per gene: pooled and per condition gene body β (≥ 5 CpGs), VST expression, DESeq2 log2 fold
@@ -110,6 +120,20 @@ size.
   by the number of movable CpGs (pooled β within 0.10–0.90 over gene body + 2 kb upstream);
   GO/KEGG of the enriched modules; tail eigengene shifts; hubs (top decile intramodular
   connectivity and |kME| ≥ 0.80) against DMP/DMR status.
+* **Direction split**: the same Fisher/CMH per module for hypermethylated and hypomethylated
+  DMP genes separately (`module_dmp_enrichment_by_direction.tsv`).
+* **Expression breadth**: tau (Yanai) over the eleven experiment groups of the atlas, computed
+  on every low count passing gene BEFORE the variance pre-filter (the filter removes the evenly
+  expressed genes the test is about); Spearman of tau and of the coefficient of variation
+  against pooled gene body β, Mann–Whitney of tau in DMP bearing versus other genes
+  (`expression_breadth_*.tsv`).
+* **With and without the length adjustment**: the unadjusted Fisher and the length
+  stratified CMH odds ratio per module side by side, with each module's gene length
+  distribution and the DMP share per length quintile (`length_adjustment_effect.tsv`,
+  `dmp_share_by_length_quintile_network.tsv`).
+* The network object is cached with a content fingerprint (gene identity, matrix dimensions,
+  matrix sum, soft power); any mismatch stops the run so a changed input is never scored on a
+  stale network.
 
 ## 08_motifs — UMRs, LMRs and TF motifs
 * **Segmentation**: MethylSeekR on the pooled tail methylome restricted to CpGs at ≥ 10× in
@@ -119,9 +143,21 @@ size.
   by the module 01 bridge; HOMER thresholds converted to natural log odds.
 * **LMR gradient**: per LMR Δβ (amputated − control, ≥ 3 CpGs), seven equal size bins,
   monaLisa binned enrichment against the other bins; **bin QC (reviewer control)**: width,
-  CpG count, depth, control β and GC per bin with Kruskal–Wallis and Mann–Whitney tests.
+  CpG count, depth, control β and GC per bin with Kruskal–Wallis and Mann–Whitney tests
+  (rank biserial r, positive when the extreme bin is larger), and Spearman of |Δβ| against each
+  metric over all binned LMRs (`lmr_bin_qc*.tsv`, `lmr_delta_vs_composition.tsv`).
+* **DMRs in LMRs and UMRs**: each DMR scored for overlap with any LMR and any UMR against
+  1,000 random interval sets anchored on random analysed CpGs, once width matched and once
+  matched on the number of analysed CpGs (both region classes are defined by CpG content);
+  fold, two-sided empirical P and a Fisher test against the pooled random intervals
+  (`dmr_lmr_umr_overlap.tsv`).
 * **Promoter classes**: monaLisa enrichment across the Weber classes of *D. laeve* and of
-  human (GC panel shown beside every class heatmap).
+  human (GC panel shown beside every class heatmap); the per class log2 enrichment and
+  BH adjusted P of every motif are written (`promoter_weber_motif_enrichment.tsv`, human
+  likewise) with the count of motifs significant in at least one class
+  (`promoter_weber_motif_summary.tsv`); the human versus *D. laeve* HCP enrichment
+  correlation is a two-sided Pearson test with its 95% CI, plus Spearman
+  (`hcp_motif_human_vs_dlaeve_correlation.tsv`).
 * **Region sets**: HOMER `findMotifsGenome.pl -size given -nomotif -mknown` on UMR promoters
   (CpG matched background), LMRs and DMRs (GC matched background); results across region
   sets are not compared because their null models differ.

@@ -36,7 +36,7 @@ theme_pub <- function() theme_classic(base_size = 9, base_family = "sans") +
         plot.subtitle = element_text(size = 8, colour = "grey30"))
 # ggplot saver: manuscript .pdf + quick-view .png + vector .svg (project rule: all three)
 save_gg <- function(p, dir, name, w, h) {
-  ggsave(file.path(dir, paste0(name, ".pdf")), p, width = w, height = h)
+  ggsave(file.path(dir, paste0(name, ".pdf")), p, width = w, height = h, device = cairo_pdf)   # cairo: β glyphs
   ggsave(file.path(dir, paste0(name, ".png")), p, width = w, height = h, dpi = 150)
   ggsave(file.path(dir, paste0(name, ".svg")), p, width = w, height = h)   # vector (svg)
   cat(sprintf("  saved %s\n", name))
@@ -188,6 +188,7 @@ save_base(FIGS, "fig7_s2b_variance_cutoff", 10, 4.5, function() {
 })
 keep_var <- gene_var > var_cut
 cat(sprintf("  %d -> %d genes after variance filter\n", ncol(datExpr), sum(keep_var)))
+expr_all <- datExpr                                  # post-outlier, PRE-variance-filter matrix: kept for the breadth (tau) test in 6e
 datExpr <- datExpr[, keep_var, drop = FALSE]
 
 # ---- 4. soft-threshold power (SUPPLEMENTARY, 2 panels) -----------------------
@@ -218,8 +219,10 @@ cat("[5] modules (reuse cached wgcna.rds if present)\n")
 wgcna_rds <- file.path(OBJ, "wgcna.rds")
 if (file.exists(wgcna_rds)) {
   W <- readRDS(wgcna_rds); net <- W$net; modColors <- W$modColors; MEs <- W$MEs
-  soft_power <- W$soft_power
-  stopifnot(identical(W$genes, colnames(datExpr)))  # cache must match current datExpr
+  # cache must match the current matrix (gene identity, dimensions, content sum) and the
+  # soft power fitted above; any mismatch means the input changed: delete the cache and rerun
+  stopifnot(identical(W$genes, colnames(datExpr)), identical(W$dim, dim(datExpr)),
+            isTRUE(all.equal(W$expr_sum, sum(datExpr))), identical(W$soft_power, soft_power))
   cat("  reused cached network — blockwiseModules skipped (fast)\n")
 } else {
   # blockwiseModules calls cor() unqualified; WGCNA::cor takes extra args that
@@ -235,8 +238,8 @@ if (file.exists(wgcna_rds)) {
   modColors <- labels2colors(net$colors)
   MEs <- orderMEs(moduleEigengenes(datExpr, modColors)$eigengenes)
   MEs <- MEs[, colnames(MEs) != "MEgrey", drop = FALSE]
-  saveRDS(list(net = net, modColors = modColors, MEs = MEs,
-               genes = colnames(datExpr), meta = meta, soft_power = soft_power), wgcna_rds)
+  saveRDS(list(net = net, modColors = modColors, MEs = MEs, genes = colnames(datExpr), meta = meta,
+               soft_power = soft_power, dim = dim(datExpr), expr_sum = sum(datExpr)), wgcna_rds)
 }
 mod_dt <- data.table(gene_id = colnames(datExpr), module = modColors)
 fwrite(mod_dt, file.path(DAT, "module_assignments.tsv"), sep = "\t")
@@ -315,7 +318,7 @@ p_fisher <- ggplot(enr_fig, aes(module, OR_adj)) +
   geom_hline(yintercept = 1, linetype = "dashed", colour = "#C0392B", linewidth = 0.4) +
   scale_colour_manual(values = c(`TRUE` = "#2C7FB8", `FALSE` = "grey65"), name = "FDR < 0.05") +
   scale_size_continuous(name = "Genes with ≥1 DMP", range = c(2, 9)) +
-  scale_y_continuous(breaks = c(0.5, 1.0, 1.5)) +
+  scale_y_log10(breaks = c(0.25, 0.5, 1, 2, 4)) +
   coord_flip() +
   labs(x = "WGCNA module",
        y = "CMH common odds ratio and 95% CI, stratified by gene length\n(module vs rest of network)",
@@ -385,9 +388,9 @@ for (m in enr2$module) {
 sf <- strat[!is.na(OR)]
 sf[, module := factor(module, levels = levels(enr_fig$module))]
 sf[, stratification := factor(stratification, levels = unique(strat$stratification))]
-p_forest <- ggplot(sf, aes(OR, module, colour = stratification)) +
+p_forest <- ggplot(sf, aes(OR, module, colour = stratification, group = stratification)) +   # one dodge group for points and CIs
   geom_vline(xintercept = 1, linetype = "dashed", colour = "#C0392B", linewidth = 0.4) +
-  geom_segment(aes(x = lo, xend = hi, yend = module), position = position_dodge(width = 0.6), linewidth = 0.45) +
+  geom_linerange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.6), linewidth = 0.45) +
   geom_point(aes(shape = fdr < 0.05), position = position_dodge(width = 0.6), size = 1.9) +
   scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 1), name = "FDR < 0.05") +
   scale_colour_manual(values = c("#2C7FB8", "#D55E00", "#009E73"), name = "Stratified by") +
@@ -430,9 +433,9 @@ for (m in enr2$module) {
 }
 ed <- enr_dir[!is.na(OR)]
 ed[, module := factor(module, levels = levels(enr_fig$module))]
-p_dir <- ggplot(ed, aes(OR, module, colour = direction)) +
+p_dir <- ggplot(ed, aes(OR, module, colour = direction, group = direction)) +
   geom_vline(xintercept = 1, linetype = "dashed", colour = "#C0392B", linewidth = 0.4) +
-  geom_segment(aes(x = lo, xend = hi, yend = module), position = position_dodge(width = 0.55), linewidth = 0.45) +
+  geom_linerange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.55), linewidth = 0.45) +
   geom_point(aes(shape = fdr < 0.05), position = position_dodge(width = 0.55), size = 1.9) +
   scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 1), name = "FDR < 0.05") +
   scale_colour_manual(values = c(Hyper = "#C0392B", Hypo = "#0072B2"), name = "DMP direction") +
@@ -452,12 +455,14 @@ save_gg(p_dir, FIGS, "figS7_module_dmp_direction", 6.4, 4.4)
 # coefficient of variation across the 40 libraries. Both against 02_landscape's pooled
 # gene-body beta (>= 5 CpGs), and DMP-bearing vs other genes.
 cat("[6e] expression breadth (tau) vs gene-body methylation\n")
-grp <- meta[rownames(datExpr), "group"]
-gm  <- t(apply(datExpr, 2, function(v) tapply(v, grp, mean)))          # genes x groups
+# Computed on expr_all (every low-count-passing gene, before the variance pre-filter):
+# the filter drops the evenly expressed low-tau genes, which are the ones this test is about.
+grp <- meta[rownames(expr_all), "group"]
+gm  <- t(apply(expr_all, 2, function(v) tapply(v, grp, mean)))         # genes x groups
 gm0 <- gm - min(gm, na.rm = TRUE)                                          # zero floor for tau
 tau <- apply(gm0, 1, function(v) { mx <- max(v); if (!is.finite(mx) || mx <= 0) return(NA_real_); sum(1 - v / mx) / (length(v) - 1) })
-cv  <- apply(datExpr, 2, function(v) sd(v) / mean(v))
-br <- data.table(gene_id = colnames(datExpr), tau = tau, cv = cv)
+cv  <- apply(expr_all, 2, function(v) sd(v) / mean(v))
+br <- data.table(gene_id = colnames(expr_all), tau = tau, cv = cv)
 br <- merge(br, gb, by = "gene_id")                                        # gb: gene_id + pooled gene-body beta (§6c)
 br[, is_dmp := gene_id %in% dmp_genes]
 br[, module := mod_dt$module[match(gene_id, mod_dt$gene_id)]]
@@ -491,6 +496,51 @@ p_br2 <- ggplot(br, aes(is_dmp, tau, fill = is_dmp)) +
   theme_pub()
 suppressPackageStartupMessages(library(patchwork))                       # the `+` between two ggplots needs patchwork attached
 save_gg(p_br1 + p_br2 + plot_layout(widths = c(1.6, 1)), FIGS, "figS7_expression_breadth_vs_genebody_meth", 7.2, 3.0)
+
+# ---- 6f. Is the length adjustment necessary? raw vs adjusted, side by side ------------
+# length stratification so the difference is visible, and show why it matters: modules
+# differ in gene length, and the share of genes carrying a DMP climbs with length.
+cat("[6f] raw Fisher vs length-adjusted CMH per module + why\n")
+cmp <- rbind(enr2[, .(module, test = "Fisher, unadjusted", OR, lo, hi, fdr)],
+             enr2[, .(module, test = "CMH, gene-length quintiles", OR = OR_adj, lo = lo_adj, hi = hi_adj, fdr = fdr_adj)])
+cmp <- cmp[!is.na(OR)]
+med_len <- mod_len[, .(median_len = as.numeric(median(len)), n_genes = .N, pct_dmp = 100 * mean(is_dmp)), by = module]
+eff <- merge(enr2[, .(module, OR_raw = OR, fdr_raw = fdr, OR_adj, fdr_adj)], med_len, by = "module")
+eff[, verdict_raw := fifelse(fdr_raw < 0.05, fifelse(OR_raw > 1, "enriched", "depleted"), "n.s.")]
+eff[, verdict_adj := fifelse(!is.na(fdr_adj) & fdr_adj < 0.05, fifelse(OR_adj > 1, "enriched", "depleted"), "n.s.")]
+eff[, verdict_changes := verdict_raw != verdict_adj]
+fwrite(eff[order(-OR_adj)], file.path(DAT, "length_adjustment_effect.tsv"), sep = "\t")
+cat(sprintf("  verdict changes with the length adjustment for %d of %d modules: %s\n", sum(eff$verdict_changes), nrow(eff),
+            paste(eff[verdict_changes == TRUE, sprintf("%s (%s -> %s)", module, verdict_raw, verdict_adj)], collapse = "; ")))
+share_q <- mod_len[, .(pct_with_dmp = 100 * mean(is_dmp), n = .N, median_len = as.numeric(median(len))), by = lenq][order(lenq)]
+fwrite(share_q, file.path(DAT, "dmp_share_by_length_quintile_network.tsv"), sep = "\t")
+cmp[, module := factor(module, levels = levels(enr_fig$module))]
+cmp[, test := factor(test, levels = c("Fisher, unadjusted", "CMH, gene-length quintiles"))]
+p_cmp <- ggplot(cmp, aes(OR, module, colour = test, group = test)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "#C0392B", linewidth = 0.4) +
+  geom_linerange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.6), linewidth = 0.45) +
+  geom_point(aes(shape = fdr < 0.05), position = position_dodge(width = 0.6), size = 2) +
+  scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 1), name = "FDR < 0.05") +
+  scale_colour_manual(values = c(`Fisher, unadjusted` = "grey45", `CMH, gene-length quintiles` = "#2C7FB8"), name = NULL) +
+  scale_x_log10() +
+  labs(x = "Odds ratio, DMP-bearing genes (95% CI)", y = "WGCNA module", title = "Same test, without and with gene length matching") +
+  theme_pub() + theme(axis.text.y = element_text(size = 7), legend.position = "bottom", legend.text = element_text(size = 7),
+                      plot.title = element_text(size = 9, face = "bold"))
+ml_plot <- copy(mod_len)[, module := factor(module, levels = levels(enr_fig$module))][!is.na(module)]
+p_len <- ggplot(ml_plot, aes(module, len / 1000, fill = module)) +
+  geom_boxplot(outlier.size = 0.2, linewidth = 0.3) +
+  geom_hline(yintercept = median(mod_len$len) / 1000, linetype = "dashed", colour = "grey40", linewidth = 0.4) +
+  scale_fill_manual(values = setNames(levels(ml_plot$module), levels(ml_plot$module)), guide = "none") +   # module colours are their names (mod_pal is defined later, in §10)
+  scale_y_log10() + coord_flip() +
+  labs(x = NULL, y = "Gene length (kb, log scale)", title = "Modules differ in gene length") +
+  theme_pub() + theme(axis.text.y = element_text(size = 7), plot.title = element_text(size = 9, face = "bold"))
+p_share <- ggplot(share_q, aes(factor(lenq), pct_with_dmp)) +
+  geom_col(width = 0.65, fill = "#D55E00") +
+  geom_text(aes(label = sprintf("%.1f%%", pct_with_dmp)), vjust = -0.4, size = 2.4) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(x = "Gene-length quintile (1 = shortest)", y = "Genes with a DMP (%)", title = "DMP carriage rises with gene length") +
+  theme_pub() + theme(plot.title = element_text(size = 9, face = "bold"))
+save_gg(p_cmp + p_len + p_share + plot_layout(widths = c(1.4, 1, 0.9)), FIGS, "figS7_length_adjustment_effect", 10.5, 4.4)
 
 # ---- 6b-DMR. MAIN fig8d: module DMR-burden enrichment (Fisher) ---------------
 # "[6b]" — the string is code and is left untouched.)

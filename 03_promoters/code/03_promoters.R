@@ -8,7 +8,7 @@ suppressPackageStartupMessages({
 
 # ---- [0] Setup: pinned versions, paths, palette, figure helpers -------------
 # Built and validated under R 4.4.1 / Bioconductor 3.20 (Fenix, /opt/apps/r/4.4.1-studio).
-#   data.table 1.18.2.1  GenomicRanges 1.58.0  IRanges 2.40.1     Biostrings 2.74.1
+#   data.table 1.18.4  GenomicRanges 1.58.0  IRanges 2.40.1     Biostrings 2.74.1
 #   bsseq 1.42.0         ggplot2 4.0.2         scales 1.4.0       patchwork 1.3.2
 #   DESeq2 1.46.0        clusterProfiler 4.14.6  org.Hs.eg.db 3.20.0  DSS 2.54.0  svglite 2.2.2
 # A full machine-checkable record is written to sessionInfo_03_promoters.txt at the end of the run.
@@ -448,8 +448,9 @@ go_class_figs <- function(godt, tag, name, to_main = FALSE, classes = CLS_GO) {
   comb[, Description := ifelse(is.na(ontology), Description,
                                sprintf("%s (%s)", Description, ontology))]
   # Wrap long term labels: the human MF/CC names run to ~70 characters, and unwrapped
+  wrap_w <- if (to_main) 40 else 52
   comb[, Description := vapply(Description, function(s)
-    paste(strwrap(s, width = 40), collapse = "\n"), character(1))]
+    paste(strwrap(s, width = wrap_w), collapse = "\n"), character(1))]
   comb[, lab := factor(make.unique(Description), levels = rev(make.unique(Description)))]
   p <- go_dot(comb) +
     facet_grid(weber_class ~ ., scales = "free_y", space = "free_y", drop = FALSE) +
@@ -461,7 +462,7 @@ go_class_figs <- function(godt, tag, name, to_main = FALSE, classes = CLS_GO) {
   # edge and at 3.3 in the human figure's label block left the panel zero-width
   h <- max(2.4, 4.0 * length(CLS_GO) / 3)
   if (to_main) save_fig(p, sprintf("fig3g_%s_weber_class_go", tag), 4.6, h)
-  else         save_supp(p, sprintf("figS3_%s_weber_class_go", tag), 4.8, max(2.6, h * 1.15))
+  else         save_supp(p, sprintf("figS3_%s_weber_class_go", tag), 5.4, max(2.6, 0.30 * nrow(comb) + 1.4))
 }
 
 # --- D. laeve: STRING v12 route ---
@@ -558,7 +559,7 @@ if (nrow(hg_go)) {
 # ---- [9] Weber-class methylation & expression characterisation (supp only) --
 # All three classes on: (a) methylation status, (b) basal expression level,
 # (c) methylated vs silent. Reuses prom_meth/pdt + 01_genome_toolkit's DE table (an allowed
-# upstream read). The HCP-with-DMR panels live in 06_decoupling section 5 (they need 05_differential).
+# upstream read). The HCP-with-DMR panels are drawn by 06_decoupling (they need 05_differential).
 cat("[9] Weber-class promoter methylation & expression characterisation\n")
 DE_TAIL3 <- file.path(PIPE, "01_genome_toolkit/data/gene_de_tail.tsv")
 de3 <- fread(DE_TAIL3)[, .(gene_id, baseMean, log2FoldChange, padj)]
@@ -650,11 +651,11 @@ p_ms <- ggplot(ms, aes(meth_state, log2(baseMean + 1), fill = meth_state)) +
                       axis.text.x = element_text(angle = 20, hjust = 1, size = 7))
 save_supp(p_ms, "figS3_weber_class_meth_state_expression", 7.0, 3.6)
 
-# later batch): the HCP-promoter-DMR panels need 05_differential's DMR calls -- the
-# pipeline's one upward read. 07_wgcna reads promoter_weber_classification.tsv and
-# writes hcp_promoter_dmr_genes.tsv + the figS6_hcp_* panels.
+# HCP-promoter-DMR panels need 05_differential's DMR calls, so 06_decoupling reads
+# promoter_weber_classification.tsv and writes hcp_promoter_dmr_genes.tsv + the
+# figS6_hcp_* panels. Nothing in this module depends on 05_differential.
 
-# ---- [9] AP-2 domain architecture -----
+# ---- [9a] AP-2 domain architecture ----
 # The single D. laeve AP-2 gene (LOC_00012416; assembly symbol TFAP2B, JASPAR bait
 # TFAP2A) dominates the HCP motif signal, so the supplement shows its protein's
 # Pfam domain architecture, in the style of 01_genome_toolkit's figS_uhrf_domains. Domains
@@ -697,140 +698,6 @@ local({
                         plot.title = element_text(size = rel(1)))
   save_supp(pd, "figS3_ap2_domain", 4.8, 1.7)
 })
-
-# ---- [9b] Weber promoter classes across species (supplementary) --------------
-# developmental regulators everywhere, or only in the slug? A SEQUENCE-only test, so it
-# runs on published assemblies without methylation data: the three molluscs whose
-# assemblies 01_genome_toolkit staged for fig1e (Aplysia, Pomacea, Octopus) plus
-# Drosophila melanogaster as a non-regenerating outgroup, classified with the identical
-# uses the species' own STRING v12 term file (tools/string/, staged once from node12 by
-# tools/string/fetch_species.sh; defq has no network). Aplysia californica is not in
-# STRING v12, so it gets classes only, and STRING species files carry GO but no KEGG, so
-# these panels are GO only. Every input is read by path and must already exist.
-cat("[9b] Weber classes across species + HCP GO\n")
-SPD  <- file.path(BATCH, "dataset", "species")
-MOLL <- file.path(PIPE, "01_genome_toolkit/dataset/mollusc_genomes")
-STRD <- "/mnt/data/alfredvar/rlopezt/meth_paper/tools/string"
-species <- list(
-  list(name = "Aplysia californica",     fna = file.path(MOLL, "GCF_000002075.1_AplCal3.0_genomic.fna.gz"),
-       gff = file.path(SPD, "GCF_000002075.1_AplCal3.0_genomic.gff.gz"), taxid = NA_integer_),
-  list(name = "Pomacea canaliculata",    fna = file.path(MOLL, "GCF_003073045.1_ASM307304v1_genomic.fna.gz"),
-       gff = file.path(SPD, "GCF_003073045.1_ASM307304v1_genomic.gff.gz"), taxid = 400727L),
-  list(name = "Octopus bimaculoides",    fna = file.path(MOLL, "GCF_001194135.2_ASM119413v2_genomic.fna.gz"),
-       gff = file.path(SPD, "GCF_001194135.2_ASM119413v2_genomic.gff.gz"), taxid = 37653L),
-  list(name = "Drosophila melanogaster", fna = file.path(SPD, "GCF_000001215.4_Release_6_plus_ISO1_MT_genomic.fna.gz"),
-       gff = file.path(SPD, "GCF_000001215.4_Release_6_plus_ISO1_MT_genomic.gff.gz"), taxid = 7227L))
-for (sp in species) stopifnot(file.size(sp$fna) > 1e7, file.size(sp$gff) > 1e6)   # staged and not truncated
-
-# one species: RefSeq protein-coding genes -> TSS -> Weber region -> sliding classification
-classify_species <- function(sp) {
-  g <- fread(cmd = sprintf("zcat '%s' | grep -v '^#'", sp$gff), sep = "\t", header = FALSE, quote = "",
-             col.names = c("seqid","src","type","start","end","score","strand","phase","attr"))
-  g <- g[type == "gene" & grepl("gene_biotype=protein_coding", attr, fixed = TRUE)]
-  g[, gene_id := sub("^ID=([^;]+).*", "\\1", attr)]
-  g[, geneid := ifelse(grepl("GeneID:", attr, fixed = TRUE), sub(".*GeneID:([0-9]+).*", "\\1", attr), NA_character_)]
-  g[, tss := ifelse(strand == "-", end, start)]; neg <- g$strand == "-"
-  g[, `:=`(ps = ifelse(neg, tss - 200L, tss - 1300L), pe = ifelse(neg, tss + 1300L, tss + 200L))]
-  gen <- readDNAStringSet(sp$fna); names(gen) <- sub(" .*", "", names(gen))
-  gen <- gen[names(gen) %in% unique(g$seqid)]                # only sequences that carry genes
-  w <- weber_sliding(gen, g)
-  out <- cbind(g[, .(gene_id, geneid, seqid, tss)], w)[is.finite(max_oe) & is.finite(whole_oe)]
-  rm(gen); invisible(gc())
-  out[, species := sp$name]
-  cat(sprintf("  %-24s %6d protein-coding promoters -> HCP %.1f%% / ICP %.1f%% / LCP %.1f%%\n",
-              sp$name, nrow(out), 100 * mean(out$weber_class == "HCP"),
-              100 * mean(out$weber_class == "ICP"), 100 * mean(out$weber_class == "LCP")))
-  out
-}
-sp_cls <- rbindlist(lapply(species, classify_species))
-fwrite(sp_cls, file.path(DAT, "species_promoter_weber_classification.tsv"), sep = "\t")
-
-# class proportions of all six species on one axis (D. laeve + human from [2] and [5])
-SP_LEVELS <- c("Deroceras laeve", "Aplysia californica", "Pomacea canaliculata",
-               "Octopus bimaculoides", "Drosophila melanogaster", "Homo sapiens")
-prop <- rbind(
-  data.table(species = "Deroceras laeve", weber_class = pdt[biotype == "protein_coding", as.character(weber_class)]),
-  data.table(species = "Homo sapiens",    weber_class = as.character(hoe$weber_class)),
-  sp_cls[, .(species, weber_class = as.character(weber_class))])
-prop <- prop[!is.na(weber_class), .N, by = .(species, weber_class)][, pct := 100 * N / sum(N), by = species]
-fwrite(prop[order(species, weber_class)], file.path(DAT, "species_weber_class_proportions.tsv"), sep = "\t")
-prop[, `:=`(species = factor(species, levels = SP_LEVELS), weber_class = factor(weber_class, levels = c("HCP", "ICP", "LCP")))]
-p_sp <- ggplot(prop, aes(species, pct, fill = weber_class)) +
-  geom_col(width = 0.7) +
-  geom_text(aes(label = ifelse(pct >= 4, sprintf("%.0f%%", pct), "")),
-            position = position_stack(vjust = 0.5), size = 2.4, colour = "white") +
-  scale_fill_manual(values = COL_WEBER, name = NULL) +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.02))) +
-  labs(x = NULL, y = "Protein-coding promoters (%)", title = "Weber promoter classes across species") +
-  theme_pub() + theme(axis.text.x = element_text(face = "italic", angle = 30, hjust = 1),
-                      plot.title = element_text(size = rel(1)))
-save_supp(p_sp, "figS3_weber_classes_across_species", 5.2, 3.4)
-
-# GO per Weber class and species: GFF GeneID -> STRING protein (aliases file) -> STRING GO terms
-string_terms_for <- function(taxid) {
-  al <- fread(cmd = sprintf("zcat '%s' | grep -v '^#'", file.path(STRD, sprintf("%d.protein.aliases.v12.0.txt.gz", taxid))),
-              sep = "\t", header = FALSE, quote = "", col.names = c("string_id", "alias", "source"))
-  al <- unique(al[grepl("GeneID|EntrezGene", source, ignore.case = TRUE)][, .(string_id, geneid = alias)])
-  tm <- fread(cmd = sprintf("zcat '%s' | grep -v '^#'", file.path(STRD, sprintf("%d.protein.enrichment.terms.v12.0.txt.gz", taxid))),
-              sep = "\t", header = FALSE, quote = "", col.names = c("string_id", "category", "term", "description"))
-  tm <- tm[category %in% GO_CATS[c("BP", "MF", "CC")]]
-  unique(merge(tm, al, by = "string_id", allow.cartesian = TRUE)[, .(geneid, category, term, description)])
-}
-run_enr_sp <- function(sig, uni_genes, tm, cat_label) {
-  sub <- tm[category == cat_label]
-  uni <- intersect(unique(sub$geneid), uni_genes); hit <- intersect(sig, uni)
-  if (length(hit) < 5) return(data.table())
-  # STAT TEST: hypergeometric ORA (clusterProfiler enricher), BH-adjusted; universe = that
-  # species' classified protein-coding genes carrying an annotation in the category tested.
-  res <- suppressWarnings(enricher(gene = hit, universe = uni, TERM2GENE = sub[, .(term, geneid)],
-           TERM2NAME = unique(sub[, .(term, description)]), pAdjustMethod = "BH",
-           pvalueCutoff = 1, qvalueCutoff = 1, minGSSize = 5, maxGSSize = 500))
-  if (is.null(res)) return(data.table())
-  as.data.table(as.data.frame(res))
-}
-sp_go <- rbindlist(lapply(Filter(function(sp) !is.na(sp$taxid), species), function(sp) {
-  tm <- string_terms_for(sp$taxid)
-  cl <- sp_cls[species == sp$name & !is.na(geneid)]
-  uni <- unique(cl$geneid)
-  n_map <- length(intersect(uni, unique(tm$geneid)))
-  cat(sprintf("  %s: %d classified genes, %d with a STRING GO annotation\n", sp$name, length(uni), n_map))
-  stopifnot(n_map > 100)   # a silent mapping failure must not read as "no enrichment"
-  rbindlist(lapply(c("HCP", "ICP", "LCP"), function(wc) {
-    sig <- cl[weber_class == wc, geneid]
-    rbindlist(lapply(c("BP", "MF", "CC"), function(o) {
-      d <- run_enr_sp(sig, uni, tm, GO_CATS[[o]])
-      if (nrow(d)) d[, `:=`(ontology = o, weber_class = wc, species = sp$name)]
-      d
-    }), fill = TRUE)
-  }), fill = TRUE)
-}), fill = TRUE)
-fwrite(sp_go, file.path(DAT, "species_weber_class_go_enrichment.tsv"), sep = "\t")
-n_sig <- sp_go[weber_class == "HCP" & p.adjust < 0.05 & Count >= 5, .N, by = species]
-cat("  HCP GO terms at FDR<0.05 (Count>=5) per species:\n"); print(n_sig)
-
-# HCP panel: the leading terms per species (by fold; FDR<0.05, Count>=5), D. laeve and
-# human beside the three STRING species so the comparison is on one axis
-hcp_top <- function(d, sp, n = 8L) {
-  if (!nrow(d)) return(data.table())
-  d <- d[weber_class == "HCP" & ontology %in% c("BP", "MF", "CC") & p.adjust < 0.05 & Count >= 5 & is.finite(FoldEnrichment)]   # GO only: the species files carry no KEGG
-  if (!nrow(d)) return(data.table())
-  d <- d[order(-FoldEnrichment, p.adjust)][seq_len(min(n, .N))]
-  d[, .(species = sp, term = Description, ontology, FoldEnrichment, p.adjust, Count)]
-}
-hcp_all <- rbindlist(c(list(hcp_top(dl_go, "Deroceras laeve"), hcp_top(hg_go, "Homo sapiens")),
-                       lapply(unique(sp_go$species), function(s) hcp_top(sp_go[species == s], s))), fill = TRUE)
-fwrite(hcp_all, file.path(DAT, "species_hcp_go_top_terms.tsv"), sep = "\t")
-if (nrow(hcp_all)) {
-  hcp_all[, species := factor(species, levels = SP_LEVELS)]
-  hcp_all[, lab := paste0(vapply(term, function(x) paste(strwrap(x, 38), collapse = "\n"), character(1)), " (", ontology, ")")]
-  hcp_all[, lab := {  # the same term in two species needs distinct factor levels: pad with spaces, invisible in the plot
-    u <- lab; d <- ave(seq_along(u), u, FUN = seq_along); u[d > 1] <- paste0(u[d > 1], strrep(" ", d[d > 1] - 1)); factor(u, levels = rev(u)) }]
-  p_hgo <- go_dot(hcp_all) + facet_wrap(~ species, scales = "free_y", ncol = 1) +
-    labs(title = "HCP promoter genes: leading GO terms per species") +
-    theme(strip.background = element_blank(), strip.text = element_text(face = "italic", size = 8),
-          plot.title = element_text(size = rel(1)))
-  save_supp(p_hgo, "figS3_species_hcp_go", 6.2, 1.55 * length(unique(hcp_all$species)) + 1.0)
-}
 
 # ---- [10] Reproducibility: sessionInfo record -------------------------------
 writeLines(capture.output(sessionInfo()), file.path(BATCH, "sessionInfo_03_promoters.txt"))

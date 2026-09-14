@@ -11,8 +11,8 @@
 
 # silently depended on the submitting user's ~/.bashrc R_LIBS export.
 export R_LIBS="/mnt/data/alfredvar/rlopezt/rlib:/mnt/data/alfredvar/jmiranda/80-scripts/88-R-packages"
-# Pure-R batch (builds bsseq from the 4 CpG reports; MethylSeekR needs the genome
-# RDS). SLURM only sets a scratch TMPDIR and launches the single R code.
+# Pure-R module (builds the bsseq object from the 4 CpG reports and reads the HiFi
+# pileups). SLURM only sets a scratch TMPDIR and launches the single R script.
 set -euo pipefail
 export SCRATCH_JOB="/scratch/groups/alfredvar/$USER/job_$SLURM_JOB_ID"
 mkdir -p "$SCRATCH_JOB/tmp"; export TMPDIR="$SCRATCH_JOB/tmp"

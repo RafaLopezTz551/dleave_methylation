@@ -12,7 +12,7 @@ suppressPackageStartupMessages({
 
 # Pinned package versions (provenance; validated under R 4.4.1 / Bioc 3.20, Fenix):
 #   Biostrings 2.74.1     rtracklayer 1.66.0    GenomicRanges 1.58.0   GenomeInfoDb 1.42.3
-#   data.table 1.18.2.1   ggplot2 4.0.2         DESeq2 1.46.0          apeglm 1.28.0
+#   data.table 1.18.4   ggplot2 4.0.2         DESeq2 1.46.0          apeglm 1.28.0
 #   EnhancedVolcano 1.24.0  patchwork 1.3.2
 # Machine-checkable record: sessionInfo_01_genome_toolkit.txt, written at the end of the run.
 
@@ -568,6 +568,32 @@ fwrite(deg, file.path(DAT, "gene_de_tail.tsv"), sep = "\t")
 nsig_g <- deg[!is.na(padj) & padj < 0.05, .N]
 cat(sprintf("  gene DE: %d genes FDR<0.05\n", nsig_g))
 
+# ---- [7b] Argonaute superfamily census (TEXT result, Discussion) ---------------
+# The Discussion cites the PIWI/AGO complement and its tail expression, so the count is
+# produced here rather than quoted. Every chr1-31+mt locus whose eggNOG annotation carries
+# the Pfam Piwi domain is listed with its best-scoring isoform; "kept" applies the toolkit
+# rule (a Preferred_name and bit >= BIT_MIN). Clade: PIWI when eggNOG names it PIWIL* or
+# the assembly symbol is Ago3/PIWI (Drosophila Ago3 is PIWI clade), otherwise AGO.
+ago <- fread(EMAPPER, sep = "\t", quote = "", header = TRUE, skip = "#query",
+             na.strings = c("-", "", "NA"), fill = TRUE)
+setnames(ago, 1, "query"); ago <- ago[!startsWith(query, "##")]
+ago[, locus := sub("-mRNA-.*$", "", query)]
+ago <- ago[locus %in% gene_id & !is.na(PFAMs) & grepl("Piwi", PFAMs)][order(-score)][, .SD[1], by = locus]
+ago[, gff_symbol := lab_for(locus)]
+ago[, kept := !is.na(Preferred_name) & score >= BIT_MIN]
+ago[, clade := fifelse((!is.na(Preferred_name) & grepl("^PIWIL", toupper(Preferred_name))) |
+                         grepl("^(AGO3|PIWI)", toupper(gff_symbol)), "PIWI", "AGO")]
+ago[kept == FALSE, clade := "unassigned"]
+ago <- merge(ago[, .(gene_id = locus, clade, eggnog_name = Preferred_name, gff_symbol,
+                     bit = score, pfams = PFAMs, kept)],
+             deg[, .(gene_id, baseMean, log2FoldChange, padj)], by = "gene_id", all.x = TRUE)
+setorder(ago, -kept, clade, -bit)
+fwrite(ago, file.path(DAT, "argonaute_census.tsv"), sep = "\t")
+cat(sprintf("  Argonaute census: %d Piwi-domain loci, %d kept at bit >= %d (%s); PIWI-clade tail baseMean %s\n",
+            nrow(ago), sum(ago$kept), BIT_MIN,
+            paste(ago[kept == TRUE, paste0(clade, ":", gff_symbol)], collapse = ", "),
+            paste(round(ago[kept == TRUE & clade == "PIWI", baseMean]), collapse = " / ")))
+
 # DE volcano — EnhancedVolcano. Labels are FORCED to the top 5 up + top 5 down
 # NAMED genes by FDR (selectLab), so the down side is never silently dropped.
 # Cool "winter" palette (blue-green).
@@ -872,8 +898,18 @@ if (nrow(dt8) >= 4) {
   NP8 <- Sys.getenv("SLURM_CPUS_PER_TASK", "4")
   st <- system2("mafft", c("--auto", "--quiet", "--anysymbol", "--thread", NP8, shQuote(file.path(scr8, "dom.faa"))),
                 stdout = file.path(scr8, "aln.faa")); stopifnot(st == 0)
+  # -gappyout removes gap-rich columns only (-automated1 cut this divergent family from 640 to
+  # 136 columns and left three all-gap sequences, which IQ-TREE refuses). Sequences with more
+  # than half of the remaining columns gapped are dropped and flagged in the members table.
   st <- system2("trimal", c("-in", shQuote(file.path(scr8, "aln.faa")), "-out", shQuote(file.path(scr8, "aln.trim.faa")),
-                            "-automated1")); stopifnot(st == 0)
+                            "-gappyout")); stopifnot(st == 0)
+  trm8 <- readAAStringSet(file.path(scr8, "aln.trim.faa")); names(trm8) <- sub(" .*", "", names(trm8))
+  keep8 <- as.numeric(letterFrequency(trm8, "-")) / width(trm8) <= 0.5
+  cat(sprintf("  trimAl -gappyout: %d of %d alignment columns kept; %d of %d sequences dropped for > 50%% gaps\n",
+              width(trm8)[1], width(readAAStringSet(file.path(scr8, "aln.faa")))[1], sum(!keep8), length(trm8)))
+  writeXStringSet(trm8[keep8], file.path(scr8, "aln.trim.faa"))
+  tipmap[, in_tree := tip %in% names(trm8)[keep8]]
+  fwrite(tipmap[, .(tip, acc, species, gene, class, in_tree, name)], file.path(DAT, "dnmt_c5_tree_members.tsv"), sep = "\t")
   st <- system2("iqtree3", c("-s", shQuote(file.path(scr8, "aln.trim.faa")), "-m", "MFP", "-bb", "1000", "-nt", NP8,
                              "-seed", "20260426", "-pre", shQuote(file.path(scr8, "dnmt")), "-quiet", "-redo")); stopifnot(st == 0)
   tr8 <- phangorn::midpoint(read.tree(file.path(scr8, "dnmt.treefile")), node.labels = "support")

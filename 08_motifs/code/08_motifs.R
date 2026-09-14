@@ -7,6 +7,20 @@ suppressPackageStartupMessages({
 })
 PIPE   <- "/mnt/data/alfredvar/rlopezt/meth_paper/main/methylation_pipeline"
 B01    <- file.path(PIPE, "01_genome_toolkit/objects"); B02 <- file.path(PIPE, "02_landscape/objects")
+# Every cache below is reused ONLY when it is newer than each input it was computed from
+# (the PWM library from 01, the bsseq object from 02, the DMR table from 05, the JASPAR
+# sqlite); an older cache stops the run and asks to be deleted, so a rebuilt upstream can
+# never be scored silently with stale results.
+IN_BRIDGE <- file.path(PIPE, "01_genome_toolkit/data/jaspar_ortholog_bridge.tsv")
+IN_BSSEQ  <- file.path(B02, "bsseq_cov5_chrmt.rds")
+IN_DMRS   <- file.path(PIPE, "05_differential/data/dmrs_annotated.tsv")
+fresh_cache <- function(path, inputs) {
+  if (!file.exists(path)) return(FALSE)
+  if (file.mtime(path) < max(file.mtime(inputs)))
+    stop(sprintf("%s is OLDER than an upstream input (%s): delete it and rerun", basename(path),
+                 paste(basename(inputs), collapse = ", ")), call. = FALSE)
+  TRUE
+}
 B03D   <- file.path(PIPE, "03_promoters/data")             # currently UNUSED (08_motifs re-classifies Weber itself, §6a-bis)
 BATCH  <- file.path(PIPE, "08_motifs")
 OBJ <- file.path(BATCH, "objects"); DAT <- file.path(BATCH, "data")
@@ -77,7 +91,7 @@ cat("  PMD alpha check written to objects/qc_alpha_distribution_pmd_check.pdf (Q
 # [0a2] calculateFDRs grid returns FDR > 100% everywhere, so the vertebrate FDR
 # calibration is uninformative here (replaced the old "no CGI annotation" line,
 seg_cache <- file.path(OBJ, "methylseekr_segments_cov10_chrmt_gr.rds")   # cov-versioned: no stale cov5 reuse
-if (file.exists(seg_cache)) {
+if (fresh_cache(seg_cache, IN_BSSEQ)) {
   seg <- readRDS(seg_cache); cat("  reuse cached MethylSeekR segments\n")
 } else {
   # segmentUMRsLMRs draws a QC smoothScatter at the end; give it a real PDF device.
@@ -319,7 +333,7 @@ cat("  bins along the methylation-change gradient:\n"); print(table(bins))
 # 01_genome_toolkit library rebuild DELETE this .rds (and the promoter/HOMER caches) or the
 # rerun silently reuses enrichments computed with the old motif set.
 se_rds <- file.path(OBJ, "lmr_deltameth_cov10_chrmt_se.rds")   # cov-versioned
-if (file.exists(se_rds)) { se <- readRDS(se_rds); cat("  reuse cached SE\n") } else {
+if (fresh_cache(se_rds, c(IN_BRIDGE, IN_BSSEQ))) { se <- readRDS(se_rds); cat("  reuse cached SE\n") } else {
   se <- calcBinnedMotifEnrR(seqs = lmrseqs, bins = bins, pwmL = pwms,
                             background = "otherBins", BPPARAM = BPP, verbose = FALSE)
   saveRDS(se, se_rds)
@@ -468,8 +482,17 @@ metrics <- c(width = "Width (bp)", ncpg = "CpGs per LMR", cov_per_cpg = "Pooled 
              beta_ctrl = "Control methylation", gc = "GC (%)")
 qc_sum <- qc[, c(list(n = .N), lapply(.SD, median)), by = bin, .SDcols = names(metrics)][order(bin)]
 fwrite(qc_sum, file.path(DAT, "lmr_bin_qc.tsv"), sep = "\t"); print(qc_sum)
-rbis <- function(x, y) {                                   # Mann-Whitney U + rank-biserial r = 1 - 2U/(n1 n2)
-  w <- suppressWarnings(wilcox.test(x, y)); c(p = w$p.value, r = 1 - 2 * unname(w$statistic) / (length(x) * length(y)))
+# Is the size of the methylation change itself tied to LMR composition? Spearman of |delta|
+# against each metric over all binned LMRs (a monotone confound would show here directly).
+qc[, abs_delta := abs(lmr_p$delta)]
+qc_rho <- rbindlist(lapply(names(metrics), function(m) {
+  # STAT TEST: Spearman rank correlation of |deltaMeth| with the LMR metric, all binned LMRs
+  ct <- suppressWarnings(cor.test(qc$abs_delta, qc[[m]], method = "spearman"))
+  data.table(metric = m, n = nrow(qc), spearman_rho = unname(ct$estimate), p = ct$p.value)
+}))
+fwrite(qc_rho, file.path(DAT, "lmr_delta_vs_composition.tsv"), sep = "\t"); print(qc_rho)
+rbis <- function(x, y) {                                   # Mann-Whitney U + rank-biserial r = 2U/(n1 n2) - 1
+  w <- suppressWarnings(wilcox.test(x, y)); c(p = w$p.value, r = 2 * unname(w$statistic) / (length(x) * length(y)) - 1)
 }
 nb <- max(qc$bin); central <- qc$bin %in% c(3L, 4L)
 qc_test <- rbindlist(lapply(names(metrics), function(m) {
@@ -568,25 +591,47 @@ dmr_gr5 <- GRanges(dmr_dt5$chr, IRanges(dmr_dt5$start, dmr_dt5$end))
 strand(dmr_gr5) <- "*"
 lmr_set <- seg[seg$type == "LMR"]; umr_set <- seg[seg$type == "UMR"]
 strand(lmr_set) <- "*"; strand(umr_set) <- "*"
-n_rand <- 1000L; dmr_w <- width(dmr_gr5)
+n_rand <- 1000L; dmr_w <- width(dmr_gr5); dmr_ncg <- dmr_dt5$nCG
+# Two nulls. Width-matched: random analysed CpG anchors extended to a DMR width. CpG-count
+# matched: the same anchors extended to the same NUMBER of analysed CpGs as a DMR (both LMRs
+# and UMRs are defined by CpG content, so width alone under-matches them); anchors whose
+# CpG run crosses a chromosome end are dropped from that draw.
 set.seed(20260426)
-rand_counts <- t(vapply(seq_len(n_rand), function(i) {
-  anc <- cpg[sample(length(cpg), length(dmr_gr5), replace = TRUE)]
-  rg  <- trim(GRanges(seqnames(anc), IRanges(start(anc), width = sample(dmr_w, length(anc), replace = TRUE))))
-  c(lmr = sum(overlapsAny(rg, lmr_set)), umr = sum(overlapsAny(rg, umr_set)))
-}, numeric(2)))
+cpg_chr <- as.character(seqnames(cpg))
+draw <- function(kind) {
+  idx <- sample(length(cpg) - max(dmr_ncg), length(dmr_gr5), replace = TRUE)
+  if (kind == "width") {
+    rg <- trim(GRanges(cpg_chr[idx], IRanges(start(cpg)[idx], width = sample(dmr_w, length(idx), replace = TRUE)),
+                       seqinfo = seqinfo(lmr_set)))          # seqinfo makes the trim real at chromosome ends
+  } else {
+    end_idx <- idx + sample(dmr_ncg, length(idx), replace = TRUE) - 1L
+    ok  <- cpg_chr[idx] == cpg_chr[end_idx]
+    rg  <- GRanges(cpg_chr[idx[ok]], IRanges(start(cpg)[idx[ok]], end(cpg)[end_idx[ok]]))
+  }
+  c(lmr = sum(overlapsAny(rg, lmr_set)), umr = sum(overlapsAny(rg, umr_set)), n = length(rg))
+}
+rand_w <- t(vapply(seq_len(n_rand), function(i) draw("width"), numeric(3)))
+rand_c <- t(vapply(seq_len(n_rand), function(i) draw("cpg"),   numeric(3)))
 obs <- c(lmr = sum(overlapsAny(dmr_gr5, lmr_set)), umr = sum(overlapsAny(dmr_gr5, umr_set)))
-dmr_ovl <- rbindlist(lapply(c("lmr", "umr"), function(k) {
-  # STAT TEST: permutation (1,000 width-matched random interval sets; empirical P) and a
-  # two-sided Fisher exact test of DMRs vs the pooled random intervals (overlap / no overlap)
-  ft <- fisher.test(matrix(c(obs[[k]], length(dmr_gr5) - obs[[k]],
-                             sum(rand_counts[, k]), n_rand * length(dmr_gr5) - sum(rand_counts[, k])), 2))
-  data.table(region_set = toupper(k), n_dmr = length(dmr_gr5), n_regions = if (k == "lmr") length(lmr_set) else length(umr_set),
-             observed = obs[[k]], pct_dmr_overlapping = 100 * obs[[k]] / length(dmr_gr5),
-             random_mean = mean(rand_counts[, k]), random_sd = sd(rand_counts[, k]),
-             fold = obs[[k]] / mean(rand_counts[, k]),
-             empirical_p = (sum(rand_counts[, k] >= obs[[k]]) + 1) / (n_rand + 1),
-             fisher_OR = unname(ft$estimate), fisher_p = ft$p.value)
+dmr_ovl <- rbindlist(lapply(c("width matched", "CpG count matched"), function(null) {
+  rc <- if (null == "width matched") rand_w else rand_c
+  rbindlist(lapply(c("lmr", "umr"), function(k) {
+    # STAT TEST: permutation (1,000 random interval sets per null; two-sided empirical P =
+    # 2 x min(P_ge, P_le), capped at 1) and a two-sided Fisher exact test of DMRs vs the
+    # pooled random intervals (overlap / no overlap); random counts scaled to the draw size
+    frac <- rc[, k] / rc[, "n"]                                # per-draw overlap fraction
+    exp_n <- mean(frac) * length(dmr_gr5)
+    p_ge <- (sum(frac >= obs[[k]] / length(dmr_gr5)) + 1) / (n_rand + 1)
+    p_le <- (sum(frac <= obs[[k]] / length(dmr_gr5)) + 1) / (n_rand + 1)
+    ft <- fisher.test(matrix(c(obs[[k]], length(dmr_gr5) - obs[[k]],
+                               sum(rc[, k]), sum(rc[, "n"]) - sum(rc[, k])), 2))
+    data.table(region_set = toupper(k), null = null, n_dmr = length(dmr_gr5),
+               n_regions = if (k == "lmr") length(lmr_set) else length(umr_set),
+               observed = obs[[k]], pct_dmr_overlapping = 100 * obs[[k]] / length(dmr_gr5),
+               random_mean = exp_n, random_sd = sd(frac) * length(dmr_gr5),
+               fold = obs[[k]] / exp_n, empirical_p_two_sided = min(1, 2 * min(p_ge, p_le)),
+               fisher_OR = unname(ft$estimate), fisher_p = ft$p.value)
+  }))
 }))
 fwrite(dmr_ovl, file.path(DAT, "dmr_lmr_umr_overlap.tsv"), sep = "\t"); print(dmr_ovl)
 
@@ -662,14 +707,22 @@ cat("  Weber promoter bins:\n"); print(table(wbins))
 cat("  by biotype:\n"); print(table(prom9$biotype, wbins))
 promseqs <- get_seqs(prom9, "PROM")
 se_w_rds <- file.path(OBJ, "promoter_weber_pc_chrmt_se.rds")
-if (file.exists(se_w_rds)) { se_w <- readRDS(se_w_rds); cat("  reuse cached SE\n") } else {
+if (fresh_cache(se_w_rds, c(IN_BRIDGE, IN_BSSEQ))) { se_w <- readRDS(se_w_rds); cat("  reuse cached SE\n") } else {
   se_w <- calcBinnedMotifEnrR(seqs = promseqs, bins = wbins, pwmL = pwms,
                               background = "otherBins", BPPARAM = BPP, verbose = FALSE)
   saveRDS(se_w, se_w_rds)
 }
 enr_w <- as.data.table(assay(se_w, "log2enr")); setnames(enr_w, paste0("log2enr.", colnames(se_w)))
 enr_w[, `:=`(motif = rownames(se_w), tf = rowData(se_w)$motif.name)]
+padj_w <- as.data.table(assay(se_w, "negLog10Padj")); setnames(padj_w, paste0("negLog10Padj.", colnames(se_w)))
+enr_w <- cbind(enr_w, padj_w)                 # -log10 BH-adjusted P per class (monaLisa binomial test)
 fwrite(enr_w, file.path(DAT, "promoter_weber_motif_enrichment.tsv"), sep = "\t")
+pmax_w <- apply(assay(se_w, "negLog10Padj"), 1, function(v) if (all(is.na(v))) NA_real_ else max(v, na.rm = TRUE))
+fwrite(data.table(n_motifs = nrow(se_w), n_scored = sum(!is.na(pmax_w)),
+                  n_sig_any_class = sum(pmax_w > -log10(0.05), na.rm = TRUE)),
+       file.path(DAT, "promoter_weber_motif_summary.tsv"), sep = "\t")
+cat(sprintf("  Weber classes: %d motifs, %d scored, %d significant in at least one class (BH FDR < 0.05)\n",
+            nrow(se_w), sum(!is.na(pmax_w)), sum(pmax_w > -log10(0.05), na.rm = TRUE)))
 seW  <- pick_sig(se_w)
 nW   <- table(wbins)
 ttlW <- sprintf("Promoter TF motifs across Weber CpG classes (HCP %s / ICP %s / LCP %s)",
@@ -832,7 +885,7 @@ if (!file.exists(HOMER)) cat("  SKIPPED — HOMER not installed at tools/homer\n
     kr_file <- file.path(outdir, "knownResults.txt")
     # The HOMER scan is cached (the expensive step; ~31 min UMR promoters): delete
     # changes — a stale scan silently scores the OLD library (see §4 cache note).
-    if (file.exists(kr_file)) {
+    if (fresh_cache(kr_file, c(IN_BRIDGE, IN_BSSEQ, IN_DMRS))) {
       cat(sprintf("  [%s] reuse cached HOMER scan (%s)\n", tag, basename(outdir)))
     } else {
       cat(sprintf("  [%s] findMotifsGenome.pl on %s regions (known motifs only, %s norm)...\n",
@@ -961,13 +1014,15 @@ if (human_ok) {
   cat("  human Weber promoter bins:\n"); print(table(hbins))
   rm(hs_genome); invisible(gc())
   se_h_rds <- file.path(OBJ, "human_promoter_weber_hs9606_se.rds")   # JASPAR human motif set
-  if (file.exists(se_h_rds)) { se_h <- readRDS(se_h_rds); cat("  reuse cached SE\n") } else {
+  if (fresh_cache(se_h_rds, JASPAR_SQLITE)) { se_h <- readRDS(se_h_rds); cat("  reuse cached SE\n") } else {
     se_h <- calcBinnedMotifEnrR(seqs = hseqs, bins = hbins, pwmL = pwms_h,   # HUMAN motifs, not the slug set
                                 background = "otherBins", BPPARAM = BPP, verbose = FALSE)
     saveRDS(se_h, se_h_rds)
   }
   enr_h <- as.data.table(assay(se_h, "log2enr")); setnames(enr_h, paste0("log2enr.", colnames(se_h)))
   enr_h[, `:=`(motif = rownames(se_h), tf = rowData(se_h)$motif.name)]
+  padj_h <- as.data.table(assay(se_h, "negLog10Padj")); setnames(padj_h, paste0("negLog10Padj.", colnames(se_h)))
+  enr_h <- cbind(enr_h, padj_h)
   fwrite(enr_h, file.path(DAT, "human_promoter_weber_motif_enrichment.tsv"), sep = "\t")
   nH <- table(hbins)
   seH <- top_n_sig(dedupe_by_tf(pick_sig(se_h)))
@@ -992,8 +1047,16 @@ if (human_ok) {
   cmp9[, sig_both := dlaeve_padj > -log10(0.05) & human_padj > -log10(0.05)]
   setorder(cmp9, -delta)
   fwrite(cmp9, file.path(DAT, "hcp_motif_enrichment_human_vs_dlaeve.tsv"), sep = "\t")
-  cat(sprintf("  HCP enrichment correlates across species: Pearson r = %.2f (n = %d motifs)\n",
-              cor(cmp9$dlaeve_HCP, cmp9$human_HCP, use = "complete.obs"), nrow(cmp9)))
+  # STAT TEST: Pearson correlation (two-sided, 95% CI) and Spearman rank correlation of the
+  # per-motif HCP log2 enrichment, human vs D. laeve, over the motifs scored in both species
+  ct9 <- cor.test(cmp9$dlaeve_HCP, cmp9$human_HCP)
+  sp9 <- suppressWarnings(cor.test(cmp9$dlaeve_HCP, cmp9$human_HCP, method = "spearman"))
+  fwrite(data.table(n_motifs = nrow(cmp9), pearson_r = unname(ct9$estimate), ci_lo = ct9$conf.int[1],
+                    ci_hi = ct9$conf.int[2], p = ct9$p.value, spearman_rho = unname(sp9$estimate), p_rho = sp9$p.value,
+                    n_sig_both = sum(cmp9$sig_both)),
+         file.path(DAT, "hcp_motif_human_vs_dlaeve_correlation.tsv"), sep = "\t")
+  cat(sprintf("  HCP enrichment correlates across species: Pearson r = %.2f [%.2f, %.2f], P = %.3g (n = %d motifs)\n",
+              ct9$estimate, ct9$conf.int[1], ct9$conf.int[2], ct9$p.value, nrow(cmp9)))
   cat("  most SLUG-specific HCP motifs:\n"); print(head(cmp9[, .(tf, motif, dlaeve_HCP, human_HCP, delta)], 8))
   cat("  most HUMAN-specific HCP motifs:\n"); print(tail(cmp9[, .(tf, motif, dlaeve_HCP, human_HCP, delta)], 8))
   lab9 <- cmp9[order(-abs(delta))][1:15]

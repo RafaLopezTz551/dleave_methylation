@@ -44,7 +44,7 @@ gm[, dbeta := beta_amp - beta_ctrl]
 # ---- [2] Tail expression (HTSeq -> VST) + differential expression ------------
 # 4 control (C1S1-C4S4) vs 3 amputated (T2S6-T4S8) tail libraries; genes kept if
 # count >= 5 in >= 2 libraries; VST blind; expr_mean pools all 7 libraries.
-# The DE table (01_genome_toolkit) and DMR list (05_differential) load behind file.exists fallbacks:
+# The DE table (01_genome_toolkit) and DMR list (05_differential) must exist (stopifnot, fail loud):
 # an absent upstream file degrades the run to empty sets / NAs instead of stopping.
 cat("[2] tail expression (HTSeq -> VST) + differential expression\n")
 tail_s <- c("C1S1","C2S2","C3S3","C4S4","T2S6","T3S7","T4S8")
@@ -58,12 +58,10 @@ vsd <- vst(DESeqDataSetFromMatrix(cm, data.frame(s = tail_s), ~ 1), blind = TRUE
 expr <- data.table(gene_id = rownames(assay(vsd)), expr_mean = rowMeans(assay(vsd)))
 
 de_path <- file.path(B01D, "gene_de_tail.tsv")
-stopifnot(file.exists(de_path))                    # fail LOUD: a silent empty-DE fallback fakes a null
-stopifnot(file.exists(de_path)); de <- fread(de_path)
+stopifnot(file.exists(de_path)); de <- fread(de_path)   # fail LOUD: a silent empty-DE fallback would fake a null
 
 dmr_path <- file.path(B05D, "dmrs_annotated.tsv")
 stopifnot(file.exists(dmr_path))                   # same rule: sections 3b/4 read it unguarded anyway
-stopifnot(file.exists(dmr_path))
 # definition as the Venn and the Methods, not only the single display gene per DMR
 dmr_asg_path <- file.path(B05D, "dmrs_gene_assignments.tsv")
 dmr_genes <- if (file.exists(dmr_asg_path)) unique(fread(dmr_asg_path)$gene_id) else unique(fread(dmr_path)$gene_id)
@@ -188,7 +186,7 @@ p_occ <- ggplot(ors, aes(OR, test)) +
   scale_x_log10() +
   labs(x = "Odds ratio, DMR-bearing vs differentially expressed (95% CI)", y = NULL,
        title = "Occurrence") + theme_pub()
-r2 <- data.table(axis = c("Baseline methylation\nvs expression", "Methylation change\nvs expression change"),
+r2 <- data.table(axis = c("Baseline\nmethylation vs\nexpression", "Methylation\nchange vs\nexpression change"),
                  R2 = c(summ$baseline_methylation_expr_R2, summ$differential_dMeth_dExpr_R2))
 r2[, axis := factor(axis, levels = axis)]
 p_mag <- ggplot(r2, aes(axis, R2)) +
@@ -197,7 +195,7 @@ p_mag <- ggplot(r2, aes(axis, R2)) +
   scale_y_continuous(expand = expansion(mult = c(0, 0.3))) +
   labs(x = NULL, y = "Variance explained (R²)", title = "Magnitude") +
   theme_pub() + theme(axis.text.x = element_text(size = 7))
-save_fig(p_dir + p_occ + p_mag + plot_layout(widths = c(1.15, 1.15, 0.8)), "fig6a_decoupling_three_axes", 9.0, 2.8)
+save_fig(p_dir + p_occ + p_mag + plot_layout(widths = c(1.1, 1.1, 1.0)), "fig6a_decoupling_three_axes", 9.5, 2.9)
 
 # ---- [4] Supplementary DSS tracks for the DMP∩DMR∩DE genes -------------------
 # For genes simultaneously DMP-, DMR- and DE-associated (05_differential Venn, strict DE):
@@ -294,6 +292,7 @@ if (nrow(hdmr)) {
   dev.off()
   for (i in seq_len(nrow(hdmr))) {                                             # single-page png + svg
     nm <- sprintf("figS6_hcp_dmr_%s", gsub("[^A-Za-z0-9]+", "_", hdmr$symbol[i]))
+    if (sum(hdmr$symbol == hdmr$symbol[i]) > 1) nm <- sprintf("%s_%d", nm, i)   # two DMRs in one gene keep separate files
     png(file.path(FIGS, paste0(nm, ".png")), width = 6.5, height = 5, units = "in", res = 150); draw_hcp(i); dev.off()
     svglite::svglite(file.path(FIGS, paste0(nm, ".svg")), width = 6.5, height = 5); draw_hcp(i); dev.off()
   }

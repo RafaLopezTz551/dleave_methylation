@@ -8,7 +8,7 @@ suppressPackageStartupMessages({
 # rtracklayer and DESeq2 are attached later, where first used (MethylSeekR is no
 
 # Pinned package versions, validated under R 4.4.1 / Bioc 3.20 (Fenix, /opt/apps/r):
-#   data.table 1.18.2.1  GenomicRanges 1.58.0  IRanges 2.40.1  Biostrings 2.74.1
+#   data.table 1.18.4  GenomicRanges 1.58.0  IRanges 2.40.1  Biostrings 2.74.1
 #   bsseq 1.42.0  ggplot2 4.0.2  scales 1.4.0  patchwork 1.3.2
 #   rtracklayer 1.66.0  DESeq2 1.46.0  GenomeInfoDb 1.42.3
 
