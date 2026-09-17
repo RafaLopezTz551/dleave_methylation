@@ -1,4 +1,4 @@
-# 00_preprocessing — from raw reads to the inputs the analysis scripts read
+# 00_preprocessing: From raw reads to the inputs the analysis scripts read
 
 Nothing in this folder is run by the analysis scripts. It documents, with the exact job
 scripts that were used on the Fénix cluster (UNAM/LAVIS, Slurm), how the raw sequencing
