@@ -1,23 +1,33 @@
 #!/usr/bin/env Rscript
+# 07_wgcna.R
+# Multi-tissue WGCNA co-expression network with a methylation overlay: module-level DMP/DMR
+# enrichment (Fisher, with a length-stratified sensitivity test), GO/KEGG of the enriched modules, tail eigengene scores,
+# and hub-gene analyses.
+# Inputs: HTSeq gene counts (all tissues); 01_genome_toolkit (gff_chrmt.rds, gene_de_tail.tsv);
+#   02_landscape (gene-body methylation table, bsseq object); 03_promoters (Weber classes);
+#   05_differential (DMP and DMR tables); STRING v12 terms; JASPAR2024 sqlite; eggNOG annotations.
+# Outputs: data/*.tsv (sample map, module assignments, enrichment and hub tables);
+#   objects/wgcna.rds (cached network); figures/main/fig7{a,b,c,d}_*; figures/supplementary/fig7_s*, figS7_*
+# Run: sbatch 07_wgcna/code/07_wgcna.slurm from main/methylation_pipeline/
+
+# Step 1 - Setup: seed, packages, WGCNA thread count
 set.seed(20260426)
 suppressPackageStartupMessages({
   library(data.table); library(DESeq2); library(WGCNA)
   library(GenomicRanges); library(ggplot2)
 })
 options(stringsAsFactors = FALSE)
-# use every CPU SLURM gives us; falls back to 4 for an interactive parse-run
+# Thread count follows the SLURM allocation; falls back to 4 outside SLURM
 enableWGCNAThreads(nThreads = as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "4")))
 
-# ---- 0b. paths & output dirs ------------------------------------------------
+# Step 2 - Input paths and output directories
 PIPE   <- "/mnt/data/alfredvar/rlopezt/meth_paper/main/methylation_pipeline"
 HTSEQ  <- "/mnt/data/alfredvar/jmiranda/20-Transcriptomic_Bulk/25-metaAnalysisTranscriptome/counts_HTseq_EviAnn"
 STRING <- "/mnt/data/alfredvar/30-Genoma/31-Alternative_Annotation_EviAnn/STRING.protein.enrichment.terms.v12.0.txt"
 GFF_RDS <- file.path(PIPE, "01_genome_toolkit/objects/gff_chrmt.rds")
 DMP_TSV <- file.path(PIPE, "05_differential/data/dmps_annotated.tsv")
 DMR_TSV <- file.path(PIPE, "05_differential/data/dmrs_annotated.tsv")
-# TF reference for the §11e hub-TF census. Same TF DEFINITION as 08_motifs (JASPAR2024
-# CORE animal TF with a D. laeve ortholog) but REBUILT from source here: reading
-# queried from the sqlite; all motif scanning stays in 08_motifs.
+# JASPAR is queried for TF names only (Step 25); all motif scanning is done in 08_motifs
 JASPAR_SQLITE <- "/mnt/data/alfredvar/rlopezt/meth_paper/tools/jaspar/JASPAR2024.sqlite"
 EMAPPER <- "/mnt/data/alfredvar/30-Genoma/31-Alternative_Annotation_EviAnn/eggnog_mapper/dlasi_proteome.emapper.annotations"
 BATCH <- file.path(PIPE, "07_wgcna")
@@ -26,22 +36,21 @@ DAT  <- file.path(BATCH, "data")
 FIGM <- file.path(BATCH, "figures/main")
 FIGS <- file.path(BATCH, "figures/supplementary")
 for (d in c(OBJ, DAT, FIGM, FIGS)) dir.create(d, showWarnings = FALSE, recursive = TRUE)
-# clean figure dirs first, so no stale panel survives a rerun
+# Figure directories are emptied so no stale panel survives a rerun
 unlink(list.files(c(FIGM, FIGS), full.names = TRUE))
 
-# ---- 0c. shared style + figure savers ---------------------------------------
-COL_COND <- c(Control = "#0072B2", Amputated = "#D55E00")   # Okabe-Ito, paper-wide
+# Step 3 - Shared plot theme and figure savers (pdf, png, svg)
+COL_COND <- c(Control = "#0072B2", Amputated = "#D55E00")  # Okabe-Ito, paper-wide
 theme_pub <- function() theme_classic(base_size = 9, base_family = "sans") +
   theme(plot.title = element_text(size = 10, face = "bold"),
         plot.subtitle = element_text(size = 8, colour = "grey30"))
-# ggplot saver: manuscript .pdf + quick-view .png + vector .svg (project rule: all three)
 save_gg <- function(p, dir, name, w, h) {
-  ggsave(file.path(dir, paste0(name, ".pdf")), p, width = w, height = h, device = cairo_pdf)   # cairo: β glyphs
+  ggsave(file.path(dir, paste0(name, ".pdf")), p, width = w, height = h, device = cairo_pdf)  # cairo renders the Greek glyphs
   ggsave(file.path(dir, paste0(name, ".png")), p, width = w, height = h, dpi = 150)
-  ggsave(file.path(dir, paste0(name, ".svg")), p, width = w, height = h)   # vector (svg)
+  ggsave(file.path(dir, paste0(name, ".svg")), p, width = w, height = h)
   cat(sprintf("  saved %s\n", name))
 }
-# base-graphics saver (WGCNA dendrograms / labeledHeatmap are base plots)
+# Base-graphics saver for the WGCNA dendrograms and heatmaps
 save_base <- function(dir, name, w, h, FUN) {
   pdf(file.path(dir, paste0(name, ".pdf")), width = w, height = h); FUN(); dev.off()
   png(file.path(dir, paste0(name, ".png")), width = w, height = h,
@@ -50,14 +59,14 @@ save_base <- function(dir, name, w, h, FUN) {
   cat(sprintf("  saved %s\n", name))
 }
 
-# ---- 1. sample map, reconstructed from filenames (all tissues) --------------
+# Step 4 - Sample map reconstructed from the HTSeq count file names
 cat("[1] sample map\n")
 files <- list.files(HTSEQ, pattern = "_htseq_gene_counts.txt$")
 base  <- sub("\\.Aligned\\.out\\.bam_htseq_gene_counts\\.txt$", "", files)
 base  <- sub("_htseq_gene_counts\\.txt$", "", base)
-# bodywall libraries "control" across TWO different experiments (dcrep* irradiation,
-# fungicide_l0* fungicide), so `group`, never `condition`, feeds the WGCNA metadata,
-classify <- function(b) {                         # order matters (C#S# before C#)
+# Library prefix -> tissue, condition, experiment group. The group (third element) drives the
+# metadata and colours: 'condition' alone would merge controls of different experiments
+classify <- function(b) {  # order matters (C#S# before C#)
   if (grepl("^C[0-9]+S[0-9]+", b))  return(c("tail",      "control",    "TailControl"))
   if (grepl("^T[0-9]+S[0-9]+", b))  return(c("tail",      "amputated",  "TailAmputated"))
   if (grepl("^R[0-9]+$", b))        return(c("eye",       "amputated",  "EyeAmputated"))
@@ -74,32 +83,28 @@ classify <- function(b) {                         # order matters (C#S# before C
 cls  <- t(vapply(base, classify, character(3)))
 meta <- data.table(file = files, orig_sample = base,
                    tissue = cls[, 1], condition = cls[, 2], group = cls[, 3])
-meta <- meta[tissue != "other"]                   # keep only recognised libraries
-# Readable sample names: <Group><n>, numbered 1..N within each group in a
-# deterministic order (the original library name). Ovotestis/Juvenile/Head take no
-# condition suffix because those tissues have no experimental condition.
+meta <- meta[tissue != "other"]  # keep only recognised libraries
+# Readable sample names <Group><n>, numbered within each group in library-name order
 setorder(meta, group, orig_sample)
 meta[, sample := paste0(group, seq_len(.N)), by = group]
 fwrite(meta, file.path(DAT, "sample_map.tsv"), sep = "\t")
 cat(sprintf("  %d libraries across %d tissues, %d experiment groups\n",
             nrow(meta), uniqueN(meta$tissue), uniqueN(meta$group)))
 print(meta[, .N, by = group][order(group)])
-# switch to a plain data.frame so we can index rows by sample name below
-# (data.table ignores rownames); rows are keyed by library name from here on
+# Plain data.frame with row names so samples can be indexed by name below
 meta <- as.data.frame(meta); rownames(meta) <- meta$sample
 
-# ---- 2. counts -> gene universe -> DESeq2 low-count filter -> VST -----------
-# the variance pre-filter is applied later, in §3b, after outlier removal.
+# Step 5 - Count matrix, gene universe, low-count filter and VST
 cat("[2] counts + VST\n")
 cl  <- lapply(meta$file, function(f) {
   x <- fread(file.path(HTSEQ, f), header = FALSE, col.names = c("gene_id", "count"))
-  x[!startsWith(gene_id, "__")]                   # drop HTSeq __no_feature etc.
+  x[!startsWith(gene_id, "__")]  # drop HTSeq __no_feature etc.
 })
 ids <- cl[[1]]$gene_id
 cm  <- sapply(cl, function(x) x$count[match(ids, x$gene_id)])
 rownames(cm) <- ids; colnames(cm) <- meta$sample
 
-# gene universe = 01_genome_toolkit's gff_chrmt.rds (chr1-31 + mito, already keep_chr-filtered:
+# Gene universe from the 01_genome_toolkit GFF (chr1-31 + mito), so the chromosome filter is inherited
 gff <- readRDS(GFF_RDS)
 chr_genes <- unique(gff$ID[gff$type == "gene"])
 cm <- cm[rownames(cm) %in% chr_genes, , drop = FALSE]
@@ -108,27 +113,25 @@ cat(sprintf("  %d genes on chr1-31\n", nrow(cm)))
 cm  <- cm[rowSums(cm >= 10) >= 3, , drop = FALSE]  # >=10 reads in >=3 libraries
 cat(sprintf("  %d genes pass the low-count filter\n", nrow(cm)))
 vsd <- vst(DESeqDataSetFromMatrix(cm, meta[colnames(cm), ], ~ 1), blind = TRUE)
-datExpr <- t(assay(vsd))                           # samples x genes
+datExpr <- t(assay(vsd))  # samples x genes
 
-# ---- 3. sample clustering + outlier removal (SUPPLEMENTARY) ------------------
+# Step 6 - Sample clustering and outlier removal
 cat("[3] sample clustering / outliers\n")
 gsg <- goodSamplesGenes(datExpr, verbose = 0)
 if (!gsg$allOK) datExpr <- datExpr[gsg$goodSamples, gsg$goodGenes]
 
-# colour by EXPERIMENT GROUP, not `condition`: condition would paint the irradiation
-# and fungicide controls with the same colour and hide that they are two experiments.
+# Colour by experiment group, not condition (see Step 4)
 trait_colors <- function(m) data.frame(
   tissue = labels2colors(as.numeric(factor(m$tissue))),
   group  = labels2colors(as.numeric(factor(m$group))))
 
-tree1 <- hclust(dist(datExpr), method = "average")   # Euclidean distance, average linkage
+tree1 <- hclust(dist(datExpr), method = "average")  # Euclidean distance, average linkage
 save_base(FIGS, "fig7_s1_sample_clustering", 12, 6, function()
   plotDendroAndColors(tree1, trait_colors(meta[rownames(datExpr), ]),
     groupLabels = c("tissue", "group"),
     main = "Sample clustering (outliers marked)", cex.dendroLabels = 0.7))
 
-# ORIGINAL library name and translated to the new sample names, so the rename cannot
-# silently drop the wrong samples (T1S5, dcrep4, R6, irrep7).
+# Outliers are given by original library name and translated to the new sample names
 outlier_orig <- c("T1S5", "dcrep4", "R6", "irrep7")
 outliers <- meta$sample[match(outlier_orig, meta$orig_sample)]
 stopifnot(!anyNA(outliers))
@@ -143,9 +146,9 @@ save_base(FIGS, "fig7_s2_sample_clustering_no_outliers", 12, 6, function()
     groupLabels = c("tissue", "group"),
     main = "Sample clustering (outliers removed)", cex.dendroLabels = 0.7))
 
-# ---- 3b. variance pre-filter SWEEP (largest cutoff keeping scale-free) -------
-# quantile whose best soft-threshold fit still meets the WGCNA scale-free
-# criterion (R^2 >= 0.85 at power <= 20). Writes variance_filter_sweep.tsv + fig8_s2b.
+# Step 7 - Variance pre-filter sweep: largest cutoff that keeps scale-free topology
+# Per-gene variance after outlier removal; for each candidate quantile the soft-threshold fit is
+# recomputed and the largest quantile with R^2 >= 0.85 at some power <= 20 is chosen
 cat("[3b] variance pre-filter sweep (largest cutoff keeping scale-free topology)\n")
 SFT_CUT  <- 0.85
 powers   <- c(1:10, seq(12, 20, 2))
@@ -165,7 +168,7 @@ fwrite(sweep, file.path(DAT, "variance_filter_sweep.tsv"), sep = "\t")
 print(sweep)
 good <- sweep[!is.na(power)]
 if (!nrow(good)) stop("no variance cutoff reaches the scale-free criterion (R^2 >= 0.85)")
-sel     <- good[which.max(q)]                        # most aggressive filter that still works
+sel     <- good[which.max(q)]  # most aggressive filter that still works
 var_q   <- sel$q
 var_cut <- quantile(gene_var, var_q)
 cat(sprintf("  chosen variance quantile = %.2f -> %d genes (best R2 = %.3f at power %d)\n",
@@ -186,17 +189,17 @@ save_base(FIGS, "fig7_s2b_variance_cutoff", 10, 4.5, function() {
   legend("bottomleft", legend = c("scale-free criterion", "chosen"),
          col = "red", lty = c(2, NA), pch = c(NA, 19), bty = "n")
 })
-keep_var <- gene_var > var_cut
+keep_var <- gene_var > var_cut  # strictly greater
 cat(sprintf("  %d -> %d genes after variance filter\n", ncol(datExpr), sum(keep_var)))
-expr_all <- datExpr                                  # post-outlier, PRE-variance-filter matrix: kept for the breadth (tau) test in 6e
+expr_all <- datExpr  # pre-variance-filter matrix, used in Step 14
 datExpr <- datExpr[, keep_var, drop = FALSE]
 
-# ---- 4. soft-threshold power (SUPPLEMENTARY, 2 panels) -----------------------
+# Step 8 - Soft-threshold power
 cat("[4] soft threshold\n")
 powers <- c(1:10, seq(12, 20, 2))
 sft <- pickSoftThreshold(datExpr, powerVector = powers, networkType = "signed", verbose = 0)
 soft_power <- sft$powerEstimate
-if (is.na(soft_power)) soft_power <- 14
+if (is.na(soft_power)) soft_power <- 14  # fallback when no power reaches R^2 0.85
 cat(sprintf("  chosen soft power = %d\n", soft_power))
 fi <- sft$fitIndices
 save_base(FIGS, "fig7_s3_soft_threshold", 10, 5, function() {
@@ -212,21 +215,17 @@ save_base(FIGS, "fig7_s3_soft_threshold", 10, 5, function() {
   text(fi[, 1], fi[, 5], labels = powers, col = "red", cex = 0.9)
 })
 
-# ---- 5. modules: REUSE the saved network if present (skip the ~2h TOM) ------
-# upstream change that leaves the gene set intact would silently reuse a stale
-# network. Project rule: delete objects/wgcna.rds by hand after any upstream change.
+# Step 9 - Module detection (blockwiseModules), cached in objects/wgcna.rds
+# The cache is reused only if gene identity, matrix dimensions, matrix sum and soft power match
 cat("[5] modules (reuse cached wgcna.rds if present)\n")
 wgcna_rds <- file.path(OBJ, "wgcna.rds")
 if (file.exists(wgcna_rds)) {
   W <- readRDS(wgcna_rds); net <- W$net; modColors <- W$modColors; MEs <- W$MEs
-  # cache must match the current matrix (gene identity, dimensions, content sum) and the
-  # soft power fitted above; any mismatch means the input changed: delete the cache and rerun
   stopifnot(identical(W$genes, colnames(datExpr)), identical(W$dim, dim(datExpr)),
             isTRUE(all.equal(W$expr_sum, sum(datExpr))), identical(W$soft_power, soft_power))
   cat("  reused cached network — blockwiseModules skipped (fast)\n")
 } else {
-  # blockwiseModules calls cor() unqualified; WGCNA::cor takes extra args that
-  # stats::cor rejects, so we temporarily mask it (restored right after).
+  # blockwiseModules calls cor() unqualified; WGCNA::cor is masked in temporarily
   cor <- WGCNA::cor
   net <- blockwiseModules(datExpr,
     power = soft_power, networkType = "signed", TOMType = "signed",
@@ -234,7 +233,7 @@ if (file.exists(wgcna_rds)) {
     numericLabels = TRUE, pamRespectsDendro = FALSE,
     maxBlockSize = 25000, saveTOMs = FALSE, verbose = 0)  # single block
   cor <- stats::cor
-  stopifnot(length(net$dendrograms) == 1)          # if this fails, raise maxBlockSize
+  stopifnot(length(net$dendrograms) == 1)  # if this fails, raise maxBlockSize
   modColors <- labels2colors(net$colors)
   MEs <- orderMEs(moduleEigengenes(datExpr, modColors)$eigengenes)
   MEs <- MEs[, colnames(MEs) != "MEgrey", drop = FALSE]
@@ -243,27 +242,27 @@ if (file.exists(wgcna_rds)) {
 }
 mod_dt <- data.table(gene_id = colnames(datExpr), module = modColors)
 fwrite(mod_dt, file.path(DAT, "module_assignments.tsv"), sep = "\t")
-mods <- setdiff(sort(unique(modColors)), "grey")   # real modules (grey = unassigned)
+mods <- setdiff(sort(unique(modColors)), "grey")  # real modules (grey = unassigned)
 cat(sprintf("  %d modules (+ grey); %d genes unassigned\n",
             length(mods), sum(modColors == "grey")))
 
-# gene/module dendrogram (SUPPLEMENTARY)
+# Gene dendrogram with module colours
 save_base(FIGS, "fig7_s4_module_dendrogram", 10, 6, function()
   plotDendroAndColors(net$dendrograms[[1]], modColors[net$blockGenes[[1]]],
     "Module", dendroLabels = FALSE, hang = 0.03, addGuide = TRUE,
     guideHang = 0.05, main = "Gene dendrogram and module colours"))
 
-# ---- 6. module DMP-burden enrichment (raw Fisher; fig8a plots the §6b CMH) ---
+# Step 10 - Module DMP-burden enrichment (Fisher, unadjusted)
 cat("[6] module DMP-burden Fisher test\n")
 dmp_genes <- unique(fread(DMP_TSV)$gene_id)
 dmp_genes <- dmp_genes[!is.na(dmp_genes) & dmp_genes != ""]
-univ <- mod_dt$gene_id                             # universe = ALL network genes (grey/unassigned included)
+univ <- mod_dt$gene_id  # universe = ALL network genes (grey/unassigned included)
 enr <- rbindlist(lapply(mods, function(m) {
   inmod <- mod_dt$gene_id[mod_dt$module == m]
-  a <- sum(inmod %in% dmp_genes)                   # in-module & DMP
-  b <- length(inmod) - a                           # in-module & not-DMP
-  c_ <- sum(univ %in% dmp_genes) - a               # out-module & DMP
-  d <- length(univ) - length(inmod) - c_           # out-module & not-DMP
+  a <- sum(inmod %in% dmp_genes)  # in-module & DMP
+  b <- length(inmod) - a  # in-module & not-DMP
+  c_ <- sum(univ %in% dmp_genes) - a  # out-module & DMP
+  d <- length(univ) - length(inmod) - c_  # out-module & not-DMP
   # STAT TEST: two-sided Fisher's exact test on the 2x2 (module members vs rest of network)
   ft <- fisher.test(matrix(c(a, b, c_, d), 2))
   data.table(module = m, n_genes = length(inmod), n_dmp = a,
@@ -274,13 +273,11 @@ enr[, fdr := p.adjust(p, "BH")]
 enr <- enr[order(-OR)]
 fwrite(enr, file.path(DAT, "module_dmp_enrichment.tsv"), sep = "\t")
 
-# ---- 6b. the SAME test, stratified by gene length ----------------------------
-# collect DMPs by target size alone (it already dissolved the coding-vs-lncRNA
-# enrichment, OR 2.09 -> 0.93, 05_differential §10b), and the enriched modules here skew
-# long. So every module test is repeated as a Cochran-Mantel-Haenszel common OR
-# across gene-length quintiles: a module surviving this is not enriched by gene size.
+# Step 11 - Length-stratified CMH test per module (sensitivity analysis) and main panel fig7a
+# Longer genes carry more CpGs and collect DMPs by size alone, so the 2x2 test is repeated as a
+# Cochran-Mantel-Haenszel common odds ratio across gene-length quintiles
 cat("[6b] module DMP enrichment, stratified by gene-length quintile\n")
-gn8b <- gff[gff$type == "gene"]          # gff loaded in §2; gene_gr8 not built until §11b
+gn8b <- gff[gff$type == "gene"]
 glen <- data.table(gene_id = sub(";.*", "", as.character(gn8b$ID)), len = width(gn8b))
 mod_len <- merge(mod_dt[, .(gene_id, module)], glen, by = "gene_id")
 mod_len[, lenq := cut(len, quantile(len, seq(0, 1, 0.2)), include.lowest = TRUE, labels = FALSE)]
@@ -288,7 +285,7 @@ mod_len[, is_dmp := gene_id %in% dmp_genes]
 enr_adj <- rbindlist(lapply(mods, function(m) {
   x <- copy(mod_len)[, inmod := module == m]
   tb <- table(factor(x$inmod, c(TRUE, FALSE)), factor(x$is_dmp, c(TRUE, FALSE)), x$lenq)
-  # drop length strata with an empty margin (CMH cannot use them)
+  # Strata with an empty margin cannot enter the CMH test
   keep <- apply(tb, 3, function(s) all(rowSums(s) > 0) && all(colSums(s) > 0))
   if (sum(keep) < 2) return(data.table(module = m, OR_adj = NA_real_, lo_adj = NA_real_,
                                        hi_adj = NA_real_, p_adj_test = NA_real_))
@@ -304,38 +301,31 @@ for (i in seq_len(nrow(enr2))) with(enr2[i], cat(sprintf(
   "  %-16s %6.2f %9.2g | %11.2f %9.2g   %s\n", module, OR, fdr, OR_adj, fdr_adj,
   if (!is.na(fdr_adj) && fdr_adj < 0.05) "YES" else "no")))
 
-# fig8a lollipop: x = odds ratio (effect size), colour = FDR < 0.05, size = #DMP
-# test (enr2: OR_adj/fdr_adj), never the raw Fisher — the raw panel contradicted
-# the Results text (yellow/turquoise are pure gene length; pink/red significant
-# only after adjustment). Modules whose CMH is NA are dropped, not drawn as gaps.
-enr_fig <- enr2[!is.na(OR_adj) & !is.na(fdr_adj)]
-setorder(enr_fig, OR_adj)
+# fig7a plots the unadjusted Fisher test (odds ratio, 95% CI, FDR); the length-stratified
+# CMH in enr2 is kept only as a sensitivity table
+enr_fig <- copy(enr)
+setorder(enr_fig, OR)
 enr_fig[, module := factor(module, levels = module)]
-p_fisher <- ggplot(enr_fig, aes(module, OR_adj)) +
-  geom_segment(aes(xend = module, y = 1, yend = OR_adj), colour = "grey85", linewidth = 0.3) +
-  geom_segment(aes(xend = module, y = lo_adj, yend = hi_adj), colour = "grey45", linewidth = 0.45) +
-  geom_point(aes(size = n_dmp, colour = fdr_adj < 0.05), alpha = 0.9) +
+p_fisher <- ggplot(enr_fig, aes(module, OR)) +
+  geom_segment(aes(xend = module, y = 1, yend = OR), colour = "grey85", linewidth = 0.3) +
+  geom_segment(aes(xend = module, y = lo, yend = hi), colour = "grey45", linewidth = 0.45) +
+  geom_point(aes(size = n_dmp, colour = fdr < 0.05), alpha = 0.9) +
   geom_hline(yintercept = 1, linetype = "dashed", colour = "#C0392B", linewidth = 0.4) +
   scale_colour_manual(values = c(`TRUE` = "#2C7FB8", `FALSE` = "grey65"), name = "FDR < 0.05") +
   scale_size_continuous(name = "Genes with ≥1 DMP", range = c(2, 9)) +
   scale_y_log10(breaks = c(0.25, 0.5, 1, 2, 4)) +
   coord_flip() +
   labs(x = "WGCNA module",
-       y = "CMH common odds ratio and 95% CI, stratified by gene length\n(module vs rest of network)",
-       title = "DMP enrichment per WGCNA module,\nmatched for gene length") +
+       y = "Odds ratio and 95% CI, Fisher's exact test\n(module vs rest of network)",
+       title = "DMP enrichment per WGCNA module") +
   theme_pub() + theme(axis.text.y = element_text(size = 7),
                       axis.title.x = element_text(size = 8),
                       plot.title = element_text(size = 9, face = "bold"))
 save_gg(p_fisher, FIGM, "fig7a_module_dmp_fisher", 4.2, 2.8)
 
-# ---- 6c. the SAME test, stratified by gene length x baseline methylation, and by movable CpGs
-# at 1, so modules whose gene bodies sit at intermediate methylation carry more "movable"
-# CpGs whatever their biology. Two more Cochran-Mantel-Haenszel stratifications of the
-# same 2x2: (i) gene-length quintile x pooled gene-body beta quintile (02_landscape's
-# per-gene beta; strata with an empty margin dropped), (ii) quintile of the number of
-# movable CpGs per gene (pooled beta within [0.10, 0.90] over the gene body + 2 kb
-# upstream, the DMP assignment window). Genes without a beta, or without a covered CpG
-# in that window, cannot enter the stratified table and are dropped from it (n reported).
+# Step 12 - CMH stratified by gene length x baseline methylation, and by movable CpGs
+# A CpG can only change by >= 0.10 if it is not at 0 or 1; 'movable' CpGs have pooled beta in
+# [0.10, 0.90] within the gene body + 2 kb upstream (the DMP assignment window)
 cat("[6c] module DMP enrichment stratified by baseline methylation and by movable CpGs\n")
 GB_TSV <- file.path(PIPE, "02_landscape/data/genebody_methylation_per_gene.tsv")
 BSSEQ  <- file.path(PIPE, "02_landscape/objects/bsseq_cov5_chrmt.rds")
@@ -344,18 +334,18 @@ suppressPackageStartupMessages(library(bsseq))
 bs7 <- readRDS(BSSEQ)
 beta_pool <- rowSums(as.matrix(getCoverage(bs7, type = "M"))) / pmax(rowSums(as.matrix(getCoverage(bs7, type = "Cov"))), 1)
 cpg7 <- granges(bs7); rm(bs7); invisible(gc())
-mov <- cpg7[beta_pool >= 0.10 & beta_pool <= 0.90]                # CpGs that can move by >= 0.10 either way
-win7 <- gn8b; s7 <- as.character(strand(gn8b))                   # gene body + 2 kb upstream
+mov <- cpg7[beta_pool >= 0.10 & beta_pool <= 0.90]  # CpGs that can move by >= 0.10 either way
+win7 <- gn8b; s7 <- as.character(strand(gn8b))  # gene body + 2 kb upstream
 start(win7)[s7 != "-"] <- pmax(1L, start(win7)[s7 != "-"] - 2000L)
 end(win7)[s7 == "-"] <- end(win7)[s7 == "-"] + 2000L
-win7 <- suppressWarnings(trim(win7))                            # same chr names as the bsseq object; clip 2 kb overhangs
+win7 <- suppressWarnings(trim(win7))  # clip 2 kb overhangs at chromosome ends
 movdt <- data.table(gene_id = sub(";.*", "", as.character(gn8b$ID)),
                     n_covered = countOverlaps(win7, cpg7), n_movable = countOverlaps(win7, mov))
 fwrite(movdt, file.path(DAT, "movable_cpgs_per_gene.tsv"), sep = "\t")
 ml <- merge(mod_len, gb, by = "gene_id", all.x = TRUE)
 ml <- merge(ml, movdt, by = "gene_id", all.x = TRUE)
 ml[!is.na(beta), betaq := cut(beta, unique(quantile(beta, seq(0, 1, 0.2))), include.lowest = TRUE, labels = FALSE)]
-ml[!is.na(betaq), len_beta := (lenq - 1L) * 5L + betaq]         # 25 joint strata
+ml[!is.na(betaq), len_beta := (lenq - 1L) * 5L + betaq]  # 25 joint strata
 ml[!is.na(n_movable) & n_covered > 0, movq := cut(n_movable, unique(quantile(n_movable, seq(0, 1, 0.2))), include.lowest = TRUE, labels = FALSE)]
 cmh_by <- function(col, label) {
   out <- rbindlist(lapply(mods, function(m) {
@@ -384,11 +374,11 @@ for (m in enr2$module) {
   r3 <- strat[module == m & stratification == "Movable CpGs per gene (quintiles)"]
   cat(sprintf("  %-16s %8.2f %8.2g | %8.2f %8.2g | %8.2f %8.2g\n", m, r1$OR, r1$fdr, r2$OR, r2$fdr, r3$OR, r3$fdr))
 }
-# supp forest: all three stratifications with 95% CIs, modules ordered by the length-adjusted OR
+# Forest plot of all three stratifications, modules ordered by the length-adjusted OR
 sf <- strat[!is.na(OR)]
 sf[, module := factor(module, levels = levels(enr_fig$module))]
 sf[, stratification := factor(stratification, levels = unique(strat$stratification))]
-p_forest <- ggplot(sf, aes(OR, module, colour = stratification, group = stratification)) +   # one dodge group for points and CIs
+p_forest <- ggplot(sf, aes(OR, module, colour = stratification, group = stratification)) +
   geom_vline(xintercept = 1, linetype = "dashed", colour = "#C0392B", linewidth = 0.4) +
   geom_linerange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.6), linewidth = 0.45) +
   geom_point(aes(shape = fdr < 0.05), position = position_dodge(width = 0.6), size = 1.9) +
@@ -401,11 +391,7 @@ p_forest <- ggplot(sf, aes(OR, module, colour = stratification, group = stratifi
                       legend.text = element_text(size = 7), plot.title = element_text(size = 9, face = "bold"))
 save_gg(p_forest, FIGS, "figS7_module_dmp_enrichment_forest", 7.0, 4.6)
 
-# ---- 6d. direction split: hyper-only and hypo-only DMP genes per module --------
-# The GO split (projection genes gain, adhesion genes lose methylation) predicts that the
-# module enrichment should split by direction too. Same length-stratified CMH as 6b, on
-# the genes carrying at least one hypermethylated DMP and, separately, at least one
-# hypomethylated DMP (a gene can be in both sets).
+# Step 13 - Enrichment split by DMP direction (hyper / hypo), length-stratified CMH
 cat("[6d] module DMP enrichment split by direction (length-stratified CMH)\n")
 dmp_dir <- fread(DMP_TSV)[!is.na(gene_id) & gene_id != "", .(gene_id, direction)]
 dir_sets <- list(Hyper = unique(dmp_dir[direction == "Hyper", gene_id]),
@@ -446,24 +432,17 @@ p_dir <- ggplot(ed, aes(OR, module, colour = direction, group = direction)) +
                       plot.title = element_text(size = 9, face = "bold"))
 save_gg(p_dir, FIGS, "figS7_module_dmp_direction", 6.4, 4.4)
 
-# ---- 6e. expression breadth across the atlas vs gene-body methylation ----------
-# The classic invertebrate pattern: methylated gene bodies belong to broadly and stably
-# expressed genes, unmethylated ones to tissue-specific genes. Breadth = tau (Yanai et
-# al. 2005) on the mean VST expression per experiment group (11 groups, the label rule of
-# this project: never pooled across experiments), tau = sum(1 - x_i / max x) / (n - 1)
-# on VST values shifted to a zero floor; 0 = uniform, 1 = one group only. Also the
-# coefficient of variation across the 40 libraries. Both against 02_landscape's pooled
-# gene-body beta (>= 5 CpGs), and DMP-bearing vs other genes.
+# Step 14 - Expression breadth (tau) across the atlas vs gene-body methylation
+# tau = sum(1 - x_i / max x) / (n - 1) over mean VST per experiment group, on values shifted to a
+# zero floor (0 = uniform, 1 = one group only); computed on the pre-variance-filter matrix
 cat("[6e] expression breadth (tau) vs gene-body methylation\n")
-# Computed on expr_all (every low-count-passing gene, before the variance pre-filter):
-# the filter drops the evenly expressed low-tau genes, which are the ones this test is about.
 grp <- meta[rownames(expr_all), "group"]
-gm  <- t(apply(expr_all, 2, function(v) tapply(v, grp, mean)))         # genes x groups
-gm0 <- gm - min(gm, na.rm = TRUE)                                          # zero floor for tau
+gm  <- t(apply(expr_all, 2, function(v) tapply(v, grp, mean)))  # genes x groups
+gm0 <- gm - min(gm, na.rm = TRUE)  # zero floor for tau
 tau <- apply(gm0, 1, function(v) { mx <- max(v); if (!is.finite(mx) || mx <= 0) return(NA_real_); sum(1 - v / mx) / (length(v) - 1) })
 cv  <- apply(expr_all, 2, function(v) sd(v) / mean(v))
 br <- data.table(gene_id = colnames(expr_all), tau = tau, cv = cv)
-br <- merge(br, gb, by = "gene_id")                                        # gb: gene_id + pooled gene-body beta (§6c)
+br <- merge(br, gb, by = "gene_id")
 br[, is_dmp := gene_id %in% dmp_genes]
 br[, module := mod_dt$module[match(gene_id, mod_dt$gene_id)]]
 # STAT TEST: Spearman rank correlation of tau (and CV) with gene-body beta; Mann-Whitney U
@@ -494,12 +473,10 @@ p_br2 <- ggplot(br, aes(is_dmp, tau, fill = is_dmp)) +
   scale_fill_manual(values = c(`FALSE` = "grey85", `TRUE` = "#D55E00"), guide = "none") +
   labs(x = NULL, y = "Expression breadth (tau)", title = sprintf("rank-biserial r = %.2f, P = %.2g", rb, mw$p.value)) +
   theme_pub()
-suppressPackageStartupMessages(library(patchwork))                       # the `+` between two ggplots needs patchwork attached
+suppressPackageStartupMessages(library(patchwork))  # the `+` between two ggplots needs patchwork attached
 save_gg(p_br1 + p_br2 + plot_layout(widths = c(1.6, 1)), FIGS, "figS7_expression_breadth_vs_genebody_meth", 7.2, 3.0)
 
-# ---- 6f. Is the length adjustment necessary? raw vs adjusted, side by side ------------
-# length stratification so the difference is visible, and show why it matters: modules
-# differ in gene length, and the share of genes carrying a DMP climbs with length.
+# Step 15 - Raw Fisher vs length-adjusted CMH side by side, and why gene length matters
 cat("[6f] raw Fisher vs length-adjusted CMH per module + why\n")
 cmp <- rbind(enr2[, .(module, test = "Fisher, unadjusted", OR, lo, hi, fdr)],
              enr2[, .(module, test = "CMH, gene-length quintiles", OR = OR_adj, lo = lo_adj, hi = hi_adj, fdr = fdr_adj)])
@@ -530,7 +507,7 @@ ml_plot <- copy(mod_len)[, module := factor(module, levels = levels(enr_fig$modu
 p_len <- ggplot(ml_plot, aes(module, len / 1000, fill = module)) +
   geom_boxplot(outlier.size = 0.2, linewidth = 0.3) +
   geom_hline(yintercept = median(mod_len$len) / 1000, linetype = "dashed", colour = "grey40", linewidth = 0.4) +
-  scale_fill_manual(values = setNames(levels(ml_plot$module), levels(ml_plot$module)), guide = "none") +   # module colours are their names (mod_pal is defined later, in §10)
+  scale_fill_manual(values = setNames(levels(ml_plot$module), levels(ml_plot$module)), guide = "none") +  # module names are valid R colours
   scale_y_log10() + coord_flip() +
   labs(x = NULL, y = "Gene length (kb, log scale)", title = "Modules differ in gene length") +
   theme_pub() + theme(axis.text.y = element_text(size = 7), plot.title = element_text(size = 9, face = "bold"))
@@ -542,8 +519,7 @@ p_share <- ggplot(share_q, aes(factor(lenq), pct_with_dmp)) +
   theme_pub() + theme(plot.title = element_text(size = 9, face = "bold"))
 save_gg(p_cmp + p_len + p_share + plot_layout(widths = c(1.4, 1, 0.9)), FIGS, "figS7_length_adjustment_effect", 10.5, 4.4)
 
-# ---- 6b-DMR. MAIN fig8d: module DMR-burden enrichment (Fisher) ---------------
-# "[6b]" — the string is code and is left untouched.)
+# Step 16 - Module DMR-burden enrichment (Fisher); main panel fig7d
 cat("[6b] module DMR-burden Fisher test\n")
 dmr_genes <- unique(fread(DMR_TSV)$gene_id); dmr_genes <- dmr_genes[!is.na(dmr_genes) & dmr_genes != ""]
 enr_dmr <- rbindlist(lapply(mods, function(m) {
@@ -559,7 +535,7 @@ enr_dmr[, fdr := p.adjust(p, "BH")]
 fwrite(enr_dmr[order(fdr)], file.path(DAT, "module_dmr_enrichment.tsv"), sep = "\t")
 setorder(enr_dmr, OR)
 enr_dmr[, module := factor(module, levels = module)]
-p_dmr <- ggplot(enr_dmr, aes(module, OR)) +                 # odds ratio on the axis (effect size)
+p_dmr <- ggplot(enr_dmr, aes(module, OR)) +
   geom_segment(aes(xend = module, y = 1, yend = OR), colour = "grey85", linewidth = 0.3) +
   geom_point(aes(size = n_dmr, colour = fdr < 0.05), alpha = 0.9) +
   geom_hline(yintercept = 1, linetype = "dashed", colour = "#C0392B", linewidth = 0.4) +
@@ -571,14 +547,11 @@ p_dmr <- ggplot(enr_dmr, aes(module, OR)) +                 # odds ratio on the 
   theme_pub() + theme(axis.text.y = element_text(size = 7))
 save_gg(p_dmr, FIGM, "fig7d_module_dmr_fisher", 7.0, 5.0)
 
-# ---- 6c. SUPP: is the D. laeve HCP (CpG-island) gene list enriched in a module? -
-# Same Fisher test as the DMP/DMR one, but the gene set is the HCP promoter class from
-# 03_promoters (a downstream read: 03_promoters < 07_wgcna). Asks whether the slug's rare
-# CpG-island genes concentrate in any co-expression module.
+# Step 17 - HCP (CpG-island promoter) gene enrichment per module; selection of enriched modules
 cat("[6c] HCP-gene module enrichment (Fisher)\n")
 WEBER_TSV <- file.path(PIPE, "03_promoters/data/promoter_weber_classification.tsv")
 hcp_genes <- unique(fread(WEBER_TSV)[weber_class == "HCP", gene_id])
-hcp_genes <- intersect(hcp_genes, univ)                       # HCP genes that are in the network
+hcp_genes <- intersect(hcp_genes, univ)  # HCP genes that are in the network
 enr_hcp <- rbindlist(lapply(mods, function(m) {
   inmod <- mod_dt$gene_id[mod_dt$module == m]
   a <- sum(inmod %in% hcp_genes); b <- length(inmod) - a
@@ -594,7 +567,7 @@ cat(sprintf("  %d HCP genes in the network; modules enriched (FDR<0.05, OR>1): %
             length(hcp_genes), paste(enr_hcp[fdr < 0.05 & OR > 1]$module, collapse = ", ")))
 setorder(enr_hcp, OR)
 enr_hcp[, module := factor(module, levels = module)]
-p_hcp <- ggplot(enr_hcp, aes(module, OR)) +                 # odds ratio on the axis (effect size)
+p_hcp <- ggplot(enr_hcp, aes(module, OR)) +
   geom_segment(aes(xend = module, y = 1, yend = OR), colour = "grey85", linewidth = 0.3) +
   geom_point(aes(size = n_hcp, colour = fdr < 0.05), alpha = 0.9) +
   geom_hline(yintercept = 1, linetype = "dashed", colour = "#C0392B", linewidth = 0.4) +
@@ -606,36 +579,32 @@ p_hcp <- ggplot(enr_hcp, aes(module, OR)) +                 # odds ratio on the 
   theme_pub() + theme(axis.text.y = element_text(size = 7))
 save_gg(p_hcp, FIGS, "fig7_s13_module_hcp_enrichment", 7.0, 5.0)
 
-# Module selection for §7/§8: TRULY ENRICHED only — fdr_adj < 0.05 AND OR_adj > 1
-# pure gene length, and omitted pink). Fallback to the single most significant module
-# so the result is never silently empty.
-enriched <- as.character(enr2$module[which(enr2$fdr_adj < 0.05 & enr2$OR_adj > 1)])
-if (!length(enriched)) enriched <- as.character(enr2$module[which.min(enr2$fdr_adj)])
+# Enriched modules for Steps 18-19: FDR < 0.05 and OR > 1 on the unadjusted Fisher test;
+# falls back to the single most significant module so the set is never empty
+enriched <- as.character(enr$module[which(enr$fdr < 0.05 & enr$OR > 1)])
+if (!length(enriched)) enriched <- as.character(enr$module[which.min(enr$fdr)])
 cat(sprintf("  enriched modules: %s\n", paste(enriched, collapse = ", ")))
 
-# ---- 7. MAIN fig8b: GO/KEGG enrichment of the enriched modules ---------------
-# Non-model organism: no OrgDb exists for D. laeve, so GO/KEGG terms come from the
-# STRING v12 join (LOC ids) as a hand-built TERM2GENE/TERM2NAME, tested with
-# clusterProfiler::enricher (hypergeometric + BH; switched from hand-rolled phyper
+# Step 18 - GO/KEGG enrichment of the enriched modules; main panel fig7b
+# No OrgDb exists for D. laeve; terms come from the STRING v12 file as TERM2GENE/TERM2NAME
 cat("[7] GO enrichment of enriched modules\n")
 go_raw <- fread(STRING, header = TRUE, sep = "\t", quote = "")
 setnames(go_raw, 1:4, c("protein", "category", "term", "description"))
-go_raw[, gene := sub("^[^.]+\\.", "", protein)]    # STRG0A31YWK.LOC_x -> LOC_x
+go_raw[, gene := sub("^[^.]+\\.", "", protein)]  # STRG0A31YWK.LOC_x -> LOC_x
 onto_map <- c("Biological Process (Gene Ontology)" = "BP",
               "Molecular Function (Gene Ontology)" = "MF",
               "Cellular Component (Gene Ontology)" = "CC",
               "KEGG (Kyoto Encyclopedia of Genes and Genomes)" = "KEGG")
 go <- unique(go_raw[category %in% names(onto_map),
                     .(gene, term, description, ontology = onto_map[category])])
-universe  <- intersect(colnames(datExpr), unique(go$gene))   # network genes with a GO
+universe  <- intersect(colnames(datExpr), unique(go$gene))  # network genes with a GO
 go_u      <- go[gene %in% universe]
 N         <- length(universe)
 term_size <- table(go_u$term)
 term_desc <- unique(go_u[, .(term, description, ontology)])
 cat(sprintf("  %d/%d network genes carry a GO term\n", N, ncol(datExpr)))
 
-# enricher output columns are mapped back to the previous names below, so
-# downstream figures/tables are unchanged.
+# enricher output is reshaped to k (hits), n (module genes with a term), K (term size), N (universe)
 TERM2GENE <- go_u[, .(term, gene)]
 TERM2NAME <- unique(go_u[, .(term, description)])
 enrich_module <- function(mod_genes, min_term = 5, max_term = 2000, min_hits = 3) {
@@ -651,10 +620,10 @@ enrich_module <- function(mod_genes, min_term = 5, max_term = 2000, min_hits = 3
   df <- if (is.null(e)) NULL else as.data.frame(e)
   if (is.null(df) || !nrow(df)) return(NULL)
   r <- as.data.table(df)
-  r[, `:=`(k = as.integer(sub("/.*", "", GeneRatio)),   # hits in module
-           n = as.integer(sub(".*/", "", GeneRatio)),   # module genes with any term
-           K = as.integer(sub("/.*", "", BgRatio)),     # term size in universe
-           N = as.integer(sub(".*/", "", BgRatio)))]    # universe size
+  r[, `:=`(k = as.integer(sub("/.*", "", GeneRatio)),  # hits in module
+           n = as.integer(sub(".*/", "", GeneRatio)),  # module genes with any term
+           K = as.integer(sub("/.*", "", BgRatio)),  # term size in universe
+           N = as.integer(sub(".*/", "", BgRatio)))]  # universe size
   r <- r[k >= min_hits]
   if (!nrow(r)) return(NULL)
   r[, fold := (k / n) / (K / N)]
@@ -671,27 +640,22 @@ go_all <- rbindlist(lapply(enriched, function(m) {
 
 if (nrow(go_all)) {
   fwrite(go_all, file.path(DAT, "module_go_enrichment.tsv"), sep = "\t")
-  # fig8b: facet_grid modules (rows) x BP/MF/CC/KEGG (cols), space = "free_y" so
-  # each panel is sized by its term count; x = fold enrichment (log axis), colour =
-  # raw BH FDR, size = module genes with the term.
+  # Facets: modules (rows) x ontology (columns); x = fold enrichment on a log axis
   go_all[, ratio := k / n]
   go_all[, log_q := pmin(-log10(pmax(padj, 1e-300)), 50)]
-  # three terms per module x ontology — five labels per panel are unreadable at print width.
+  # Only terms with padj < 0.05, at most three per module x ontology; KEGG must be a factor level
+  # or its rows drop from the facet; make.unique guards against duplicated labels
   top <- go_all[padj < 0.05][order(padj)][, head(.SD, 3), by = .(module, ontology)]
   top[, ont_lab := factor(ontology, levels = c("BP", "MF", "CC", "KEGG"))]
   setorder(top, ont_lab, module, padj)
-  # (BP) and so on"); make.unique guards the duplicate-factor-level crash that bit
-  # 03_promoters fig3c (two modules can share a description; duplicated levels error in factor()).
   top[, lab_txt := sprintf("%s (%s)", description, ontology)]
   top[, label := factor(make.unique(lab_txt), levels = rev(make.unique(lab_txt)))]
-  p_go <- ggplot(top, aes(fold, label, colour = padj, size = k)) +   # x = fold enrichment (how enriched)
+  p_go <- ggplot(top, aes(fold, label, colour = padj, size = k)) +
     geom_point() +
     facet_grid(module ~ ont_lab, scales = "free_y", space = "free_y") +
-    # colour = the RAW BH FDR (not -log10), so the legend reads actual FDR values
     scale_colour_gradient(low = "#7B241C", high = "#F5CBA7", name = "BH FDR",
                           guide = guide_colourbar(reverse = TRUE)) +
     scale_size_continuous(range = c(2, 6), name = "Module genes") +
-    # axis piles most points into the left quarter. Breaks labelled in plain fold units.
     scale_x_log10(breaks = c(3, 30), labels = function(x) paste0(x, "x")) +
     labs(x = "Fold enrichment (observed / expected, log scale)", y = NULL,
          title = "GO and KEGG enrichment per module") +
@@ -701,20 +665,16 @@ if (nrow(go_all)) {
           strip.background = element_blank(),
           plot.margin = margin(5.5, 12, 5.5, 5.5),
           panel.grid.major.y = element_line(colour = "grey92", linewidth = 0.25))
-  # wider (4 facet columns with KEGG) and taller per module so term labels stay legible
   save_gg(p_go, FIGM, "fig7b_module_go_enrichment", 7.8, max(3.0, 1.5 * length(enriched)))
 } else {
   cat("  no GO terms evaluable for the enriched modules\n")
 }
 
-# ---- 8. MAIN fig8c: module eigengene scores, tail Control vs Amputated ------
-# The network is multi-tissue, but the regeneration contrast we report is the
-# tail Control vs Amputated one (matching the WGBS). Per-sample points, no bars.
+# Step 19 - Module eigengene scores, tail Control vs Amputated; main panel fig7c
+# Tail samples are selected by experiment group so no control of another experiment is picked up
 cat("[8] eigengene scores (tail only)\n")
-# select by GROUP, not condition, so this can never pick up a control from another
-# experiment even if the tissue labels change later
 tail_s <- rownames(meta)[meta$group %in% c("TailControl", "TailAmputated")]
-me_cols <- paste0("ME", enriched)                  # eigengenes of the enriched modules
+me_cols <- paste0("ME", enriched)  # eigengenes of the enriched modules
 me_cols <- intersect(me_cols, colnames(MEs))
 eig <- data.table(sample = tail_s, condition = meta[tail_s, "group"],
                   MEs[tail_s, me_cols, drop = FALSE])
@@ -737,20 +697,10 @@ p_eig <- ggplot(eig_long, aes(condition, eigengene, colour = condition)) +
 save_gg(p_eig, FIGM, "fig7c_eigengene_scores_tail",
         3.8, 1.36 + 1.05 * ceiling(length(me_cols) / 2))
 
-# =============================================================================
-# wgcna_2 outputs: module-trait heatmap, module sizes, module membership (kME) +
-# hub genes, and GO for ALL modules.
-# =============================================================================
-mod_pal <- setNames(sort(unique(modColors)), sort(unique(modColors)))  # module -> its colour
+# Step 20 - Module palette; module-trait heatmap over one-hot experiment groups
+mod_pal <- setNames(sort(unique(modColors)), sort(unique(modColors)))
 
-# ---- 9. SUPPLEMENTARY: module-trait heatmap (tissue x condition GROUPS) -------
-# Traits are the experiment GROUPS (TailControl, TailAmputated, EyeControl, ... kept
-# SEPARATE), one-hot encoded — NOT pooled condition + tissue dummies, which would
-# wrongly merge controls from different tissues into a single "control" column.
-# Matches WGCNA.R (meta$group one-hot with the `ord` level order).
 cat("[9] module-trait heatmap (tissue x condition groups)\n")
-# Groups come straight from meta$group (assigned once in §1), never re-derived by
-# regex: the renamed <Group><n> samples would make old name-matching silently fail.
 s   <- rownames(meta)
 grp <- meta$group
 stopifnot(!anyNA(grp))
@@ -763,7 +713,7 @@ mtc <- cor(MEs, traits, use = "p")
 # STAT TEST: module-trait association = Pearson correlation (cor, above) with WGCNA's
 # Student asymptotic p-value (corPvalueStudent, n = #samples); shown on the heatmap.
 mtp <- corPvalueStudent(mtc, nrow(MEs))
-# BH across the whole module x trait grid: this is one family of tests, and the Methods say
+# BH adjustment across the whole module x trait grid (one family of tests)
 mtp <- matrix(p.adjust(mtp, "BH"), nrow(mtp), dimnames = dimnames(mtp))
 data.table::fwrite(data.table::data.table(module = rownames(mtc), as.data.frame(mtc)),
                    file.path(DAT, "module_trait_cor.tsv"), sep = "\t")
@@ -779,7 +729,7 @@ save_base(FIGS, "fig7_s5_module_trait_heatmap", 8, 7.5, function() {
 })
 fwrite(data.table(module = rownames(mtc), mtc), file.path(DAT, "module_trait_cor.tsv"), sep = "\t")
 
-# ---- 10. SUPPLEMENTARY: module sizes (number of genes, all modules) ----------
+# Step 21 - Module sizes
 cat("[10] module sizes\n")
 sz <- as.data.table(sort(table(modColors), decreasing = TRUE)); setnames(sz, c("module", "n_genes"))
 fwrite(sz, file.path(DAT, "module_sizes.tsv"), sep = "\t")
@@ -792,21 +742,22 @@ p_sz <- ggplot(sz, aes(module, n_genes, fill = module)) + geom_col() +
   theme_pub() + theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
 save_gg(p_sz, FIGS, "fig7_s6_module_sizes", 8, 3.5)
 
-# ---- 11. SUPPLEMENTARY: module membership (kME) + hub genes ------------------
+# Step 22 - Module membership (kME), intramodular connectivity and hub genes
 cat("[11] module membership (kME) + hub genes\n")
 nGenes <- ncol(datExpr)
 kME <- as.matrix(signedKME(datExpr, MEs, outputColumnName = "kME"))
 mm_idx <- match(paste0("kME", modColors), colnames(kME))
 MM <- rep(NA_real_, nGenes); ok <- !is.na(mm_idx)
-MM[ok] <- kME[cbind(which(ok), mm_idx[ok])]               # kME of a gene to its OWN module
+MM[ok] <- kME[cbind(which(ok), mm_idx[ok])]  # kME of a gene to its OWN module
 kWithin <- setNames(rep(NA_real_, nGenes), colnames(datExpr)); kWs <- kWithin
-for (m in mods) {                                        # intramodular connectivity per module
+for (m in mods) {  # intramodular connectivity per module
   idx <- which(modColors == m); g <- colnames(datExpr)[idx]
   if (length(g) < 3) next
   adj <- adjacency(datExpr[, g, drop = FALSE], power = soft_power, type = "signed")
   kin <- rowSums(adj) - 1; rm(adj); gc(verbose = FALSE)
   kWithin[idx] <- kin; kWs[idx] <- kin / max(kin)
 }
+# Hub = top 10 percent of scaled intramodular connectivity within its module and |kME| >= 0.80
 kin_thr <- tapply(kWs, modColors, quantile, probs = 0.90, na.rm = TRUE)
 is_hub <- (modColors != "grey") & !is.na(MM) & (kWs >= kin_thr[modColors]) & (abs(MM) >= 0.80)
 is_hub[is.na(is_hub)] <- FALSE
@@ -835,11 +786,7 @@ p_mm <- ggplot(mmp, aes(ModuleMembership, kWithin, colour = is_hub)) +
   theme_pub() + theme(axis.text = element_text(size = 5), strip.background = element_blank())
 save_gg(p_mm, FIGS, "fig7_s8_module_membership", 11, 8)
 
-# ---- 11b. SUPPLEMENTARY: do the HUB genes carry the methylation changes? -----
-# Sharper question than §6/§6b: does methylation land on the genes that MATTER to
-# the network (hubs) or on ordinary module members? Hub vs non-hub tested for DMP
-# assumed away: median hub vs non-hub gene length is reported beside every OR, and
-# a length-tertile-stratified CMH test accompanies the raw Fisher OR.
+# Step 23 - Do hub genes carry the DMPs / DMRs? Fisher plus length-tertile CMH
 cat("[11b] hub genes vs DMP / DMR carriage\n")
 gene_gr8 <- gff[gff$type == "gene"]
 gid8  <- sub(";.*", "", as.character(mcols(gene_gr8)$ID))
@@ -847,7 +794,7 @@ glen8 <- setNames(width(gene_gr8), gid8)
 note8 <- vapply(mcols(gene_gr8)$Note, function(x) if (length(x)) as.character(x)[1] else NA_character_, character(1))
 sym8  <- setNames(sub("^Similar to ([^:]+):.*$", "\\1", note8), gid8)
 sym8[!grepl("^Similar to [^:]+:", note8)] <- NA
-disp8 <- function(g) ifelse(is.na(sym8[g]), g, sym8[g])      # symbol, else the LOC id (project rule)
+disp8 <- function(g) ifelse(is.na(sym8[g]), g, sym8[g])  # symbol, else the LOC id
 
 hubs <- copy(mm_tbl)
 hubs[, `:=`(has_dmp = gene_id %in% dmp_genes, has_dmr = gene_id %in% dmr_genes,
@@ -856,7 +803,7 @@ fwrite(hubs[is_hub == TRUE][order(module, -abs(ModuleMembership))][
          , .(gene_id, symbol, module, ModuleMembership, kWithin_scaled, gene_len, has_dmp, has_dmr)],
        file.path(DAT, "hub_genes_dmp_dmr.tsv"), sep = "\t")
 
-hub_test <- function(col) {                                  # hub vs non-hub, network-wide
+hub_test <- function(col) {  # hub vs non-hub, network-wide
   x <- hubs[module != "grey" & !is.na(gene_len)]
   # STAT TEST: two-sided Fisher's exact (hub vs feature); plus a Cochran-Mantel-Haenszel
   # test (mantelhaen.test) stratified by gene-length tertile to control the length confound.
@@ -877,7 +824,7 @@ hub_overall <- rbindlist(lapply(c("has_dmp", "has_dmr"), hub_test))
 fwrite(hub_overall, file.path(DAT, "hub_dmp_dmr_enrichment.tsv"), sep = "\t")
 print(hub_overall)
 
-# per module: what fraction of that module's hubs carries a DMP / a DMR
+# Per module: fraction of hubs carrying a DMP / a DMR
 hub_mod <- hubs[is_hub == TRUE, .(n_hub = .N, n_dmp = sum(has_dmp), n_dmr = sum(has_dmr),
                                   pct_dmp = 100 * mean(has_dmp), pct_dmr = 100 * mean(has_dmr)),
                 by = module][order(-n_hub)]
@@ -900,12 +847,9 @@ p_hubmeth <- ggplot(hm_long, aes(reorder(module, -pct), pct, fill = mark)) +
   theme_pub() + theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
 save_gg(p_hubmeth, FIGS, "fig7_s9_hub_dmp_dmr", 8, 4)
 
-# ---- 11c. SUPPLEMENTARY: hub DMRs — methylation change vs expression change --
-# A hub gene picks up a DMR: does its transcription follow? One row per hub DMR:
-# the DMR effect size (dMeth = control - amputated; POSITIVE = the region LOSES
-# methylation on amputation) beside the gene's DESeq2 log2FC. The panel shows
-# gene-body DMRs (exon + intron), where essentially all of them fall.
-# (paper rule padj<0.05 AND |LFC|>=1; plain padj<0.05) and the figure states which.
+# Step 24 - Hub DMRs: methylation change vs expression change
+# dMeth = control - amputated (positive = loss of methylation on amputation); two DE definitions
+# are reported: padj < 0.05 with |log2FC| >= 1, and padj < 0.05 alone
 cat("[11c] hub DMRs: dMeth vs log2FC\n")
 DE_TAIL8 <- file.path(PIPE, "01_genome_toolkit/data/gene_de_tail.tsv")
 dmr_full <- fread(DMR_TSV)[, .(gene_id, region, nCG, dmr_len = length,
@@ -928,8 +872,7 @@ print(hub_dmr[, .(symbol, module, region, nCG, meth_ctrl = round(meth_ctrl, 3),
                   meth_amp = round(meth_amp, 3), dMeth = round(dMeth, 3),
                   LFC = round(log2FoldChange, 2), padj = signif(padj, 2))])
 
-# the panel: gene-body DMRs, methylation change against expression change. Every
-# DMR-bearing gene is the grey background so the hubs are read in context.
+# Gene-body DMRs of all genes as background, hubs highlighted
 gb <- merge(dmr_full[region %in% c("Exon", "Intron")], de8, by = "gene_id")
 gb <- merge(gb, hubs[, .(gene_id, is_hub, module)], by = "gene_id", all.x = TRUE)
 gb <- gb[is.finite(log2FoldChange) & is.finite(dMeth)]
@@ -951,16 +894,9 @@ p_gb <- ggplot(gb, aes(dMeth, log2FoldChange)) +
   theme_pub()
 save_gg(p_gb, FIGS, "fig7_s10_hub_dmr_meth_vs_expression", 7, 5)
 
-# correlation is a decoupling statistic, not a network result (06_decoupling writes
-# dmr_de_correlation.tsv). 07_wgcna keeps only the hub-specific view above.
-
-# ---- 11e. are the WGCNA hubs transcription factors? --------------------------
-# Classic expectation: hubs are regulators. TF IDENTITY = 08_motifs's definition
-# (JASPAR2024 CORE animal TF with a D. laeve ortholog via EviAnn "Similar to SYM:"
-# or eggNOG Preferred_name), rebuilt from source because 07_wgcna cannot read
-# over-read: this is a NAME-level symbol match (the paper's PWM library itself now
-# requires sequence orthology, the 01_genome_toolkit TF section), and it counts only TFs that HAVE a JASPAR
-# motif — a floor on the true TF repertoire.
+# Step 25 - Transcription-factor content of the hubs
+# TF = JASPAR2024 CORE animal TF name matched to the locus symbol (EviAnn 'Similar to', else
+# eggNOG Preferred_name); a name-level match restricted to TFs that have a JASPAR motif
 cat("[11e] TF content of the WGCNA hubs\n")
 suppressPackageStartupMessages(library(RSQLite))
 con <- dbConnect(SQLite(), JASPAR_SQLITE)
@@ -968,9 +904,9 @@ jn  <- dbGetQuery(con, paste0("SELECT DISTINCT m.NAME FROM MATRIX m ",
         "JOIN MATRIX_ANNOTATION a ON m.ID=a.ID WHERE m.COLLECTION='CORE' AND ",
         "a.TAG='tax_group' AND a.VAL IN ('vertebrates','insects','nematodes','urochordates')"))
 dbDisconnect(con)
-tf_syms <- unique(toupper(unlist(strsplit(jn$NAME, "::|/"))))     # split heterodimers, as 08_motifs does
+tf_syms <- unique(toupper(unlist(strsplit(jn$NAME, "::|/"))))  # split heterodimer names
 cat(sprintf("  %d JASPAR2024 CORE animal TF symbols\n", length(tf_syms)))
-# D. laeve symbol per locus: EviAnn "Similar to SYM:" first, else eggNOG Preferred_name
+# Symbol per locus: EviAnn 'Similar to SYM:' first, else eggNOG Preferred_name
 note8b <- vapply(mcols(gene_gr8)$Note, function(x) if (length(x)) as.character(x)[1] else NA_character_, character(1))
 evi8   <- toupper(sub("^Similar to ([^:]+):.*$", "\\1", note8b)); evi8[!grepl("^Similar to [^:]+:", note8b)] <- NA
 egg8   <- fread(EMAPPER, sep = "\t", quote = "", header = TRUE, skip = "#query", na.strings = c("-","","NA"), fill = TRUE)
@@ -981,8 +917,9 @@ tfmap[, sym_use := fifelse(!is.na(evi), evi, egg)]
 tfmap[, is_tf := !is.na(sym_use) & sym_use %in% tf_syms]
 cat(sprintf("  %d D. laeve loci flagged as TFs\n", sum(tfmap$is_tf)))
 
-net <- merge(mm_tbl, tfmap[, .(gene_id, sym_use, is_tf)], by = "gene_id", all.x = TRUE)  # NOTE: shadows the blockwiseModules `net` of §5 (not used past §5)
-net[, is_tf := !is.na(is_tf) & is_tf]            # genes with no ortholog symbol -> not a TF
+# net is reassigned here; the blockwiseModules object is no longer needed
+net <- merge(mm_tbl, tfmap[, .(gene_id, sym_use, is_tf)], by = "gene_id", all.x = TRUE)
+net[, is_tf := !is.na(is_tf) & is_tf]  # genes with no ortholog symbol -> not a TF
 net <- net[module != "grey"]
 # STAT TEST: two-sided Fisher's exact test — are hub genes enriched for transcription factors?
 ft_tf <- fisher.test(table(factor(net$is_hub, c(TRUE, FALSE)), factor(net$is_tf, c(TRUE, FALSE))))
@@ -1009,14 +946,13 @@ p_tf <- {
 }
 save_base(FIGS, "fig7_s12_hub_tf_content", 8, 4.5, p_tf)
 
-# ---- 12. SUPPLEMENTARY: GO enrichment for ALL modules -----------------------
+# Step 26 - GO enrichment for all modules (one dot-plot page per module)
 cat("[12] GO for all modules\n")
 go_all_mods <- rbindlist(lapply(mods, function(m) {
   r <- enrich_module(mod_dt$gene_id[mod_dt$module == m]); if (is.null(r)) return(NULL); cbind(module = m, r)
 }), fill = TRUE)
 if (nrow(go_all_mods)) {
   fwrite(go_all_mods, file.path(DAT, "module_go_all.tsv"), sep = "\t")
-  # title carries just the module name. (Stem "fig7_s9" is also used by
   pdf(file.path(FIGS, "fig7_s9_go_all_modules.pdf"), width = 8, height = 6)
   for (m in mods) {
     r <- go_all_mods[module == m]
@@ -1036,6 +972,6 @@ if (nrow(go_all_mods)) {
   cat("  saved fig8_s9_go_all_modules.pdf (one dot-plot page per module)\n")
 } else cat("  no GO terms evaluable across modules\n")
 
-# ---- Reproducibility: record the exact package versions this run used -------
+# Step 27 - Session info
 writeLines(capture.output(sessionInfo()), file.path(BATCH, "sessionInfo_07_wgcna.txt"))
 cat("[07_wgcna] done\n")

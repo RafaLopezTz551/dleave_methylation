@@ -1,13 +1,24 @@
 #!/usr/bin/env Rscript
+# 04_TEs.R
+# Transposable-element methylation by class, age (Kimura divergence) and genomic location
+# on the PacBio HiFi bodywall methylome (main figures) and the WGBS tail samples (supplementary).
+# Inputs:  TE age table (collapsed_te_age_data.tsv), 01_genome_toolkit/objects/{genome,gff}_chrmt.rds,
+#          02_landscape/objects/bsseq_cov5_chrmt.rds (WGBS arm),
+#          02_landscape/objects/hifi_bodywall_cpg_persample_chrmt.rds (HiFi arm),
+#          Bismark splitting reports (CHH non-conversion proxy).
+# Outputs: data/*.tsv (per-copy methylation, age/location summaries, correlations, platform
+#          comparisons, statistics tables); figures/main/fig4a-fig4c_*_bodywall (pdf, png, svg);
+#          figures/supplementary/figS4_*_wgbs_tail (pdf, png, svg); sessionInfo_04_TEs.txt.
+# Run:     sbatch 04_TEs/code/04_TEs.slurm  (from main/methylation_pipeline/)
+
+# Step 1 - Setup: seed, packages, paths, palettes, theme and figure savers
 set.seed(20260426)
 suppressPackageStartupMessages({
   library(data.table); library(GenomicRanges); library(IRanges)
   library(bsseq); library(ggplot2); library(ggridges)
 })
 
-# Pinned versions (R 4.4.1 / Bioconductor 3.20, /opt/apps/r/4.4.1-studio):
-#   data.table 1.18.2.1  GenomicRanges 1.58.0  IRanges 2.40.1  bsseq 1.42.0
-#   ggplot2 4.0.2  ggridges 0.5.7. Full record: sessionInfo_04_TEs.txt (end of run).
+# Package versions are recorded in sessionInfo_04_TEs.txt at the end of the run.
 PIPE <- "/mnt/data/alfredvar/rlopezt/meth_paper/main/methylation_pipeline"
 TE   <- "/mnt/data/alfredvar/30-Genoma/32-Repeats/age_of_transposons/collapsed_te_age_data.tsv"
 B01 <- file.path(PIPE, "01_genome_toolkit/objects"); B02 <- file.path(PIPE, "02_landscape/objects")
@@ -15,10 +26,9 @@ BATCH <- file.path(PIPE, "04_TEs")
 DAT <- file.path(BATCH, "data"); FIGM <- file.path(BATCH, "figures/main")
 FIGS <- file.path(BATCH, "figures/supplementary")
 for (d in c(DAT, FIGM, FIGS)) dir.create(d, showWarnings = FALSE, recursive = TRUE)
-keep_chr <- c(paste0("chr", 1:31), "HiC_scaffold_1563")
+keep_chr <- c(paste0("chr", 1:31), "HiC_scaffold_1563")   # chr1-31 + mito scaffold
 
-# Class palette is FINAL (locked ridge hues); SINE is magenta, not teal, so it
-# stays distinguishable from DNA. Location: gene-overlapping green, intergenic red.
+# SINE is magenta so it stays distinct from DNA (teal); gene-overlapping green, intergenic red.
 COL_CLASS <- c(LTR = "#2471A3", RC = "#F39C12", LINE = "#8E44AD",
                DNA = "#1ABC9C", SINE = "#D81B60")
 COL_LOC   <- c(`Gene-overlapping` = "#2CA25F", Intergenic = "#E78A8A")
@@ -26,9 +36,9 @@ theme_pub <- function() theme_classic(base_size = 9, base_family = "sans") +
   theme(plot.title = element_text(size = 10, face = "bold"),
         plot.subtitle = element_text(size = 8, colour = "grey30"),
         panel.grid.major.y = element_line(linewidth = 0.25, colour = "grey90"),
-        strip.background = element_blank())   # no boxes around facet labels (rule)
+        strip.background = element_blank())   # no boxes around facet labels
+# cairo_pdf so the beta glyph renders in the PDF; save_supp() is the same for figures/supplementary.
 save_fig <- function(p, name, w, h) {
-  # cairo_pdf so the β glyph renders in the PDF (fixes the mbcsToSbcs failure)
   ggsave(file.path(FIGM, paste0(name, ".pdf")), p, width = w, height = h, device = cairo_pdf)
   ggsave(file.path(FIGM, paste0(name, ".png")), p, width = w, height = h, dpi = 150)
   ggsave(file.path(FIGM, paste0(name, ".svg")), p, width = w, height = h)   # vector (svg)
@@ -41,17 +51,14 @@ save_supp <- function(p, name, w, h) {   # mirrors save_fig(), writes to supplem
   cat(sprintf("  saved %s (supplementary)\n", name))
 }
 
-# ---- [1] Inputs: TE table, WGBS bsseq, GFF ----------------------------------
-# Loads the shared TE age table (chr filter applied), the strand-collapsed
-# cov>=5 WGBS bsseq object, and 01_genome_toolkit's filtered GFF (gene universe).
+# Step 2 - Inputs: TE table, repeat fraction, TE classes, WGBS bsseq, gene set
+# Step 2.1 - TE age table (keep_chr filter) and merged repeat fraction
 cat("[1] TE table + bsseq + gff\n")
 te <- fread(TE)
 te <- te[chrom %in% keep_chr]
 
-# ---- [1b] Repeat fraction of the assembly
-# Merged repeat bp over chr1-31 + mito / assembly length. Copies overlap one
-# another extensively, so intervals are merged (reduce) before summing; computed
-# BEFORE the class filter below, so unclassified copies still count as repeat.
+# Repeat bp are merged (reduce) before summing because copies overlap; computed before the class
+# filter below, so unclassified copies still count as repeat.
 gen_len <- sum(width(readRDS(file.path(B01, "genome_chrmt.rds"))))
 rep_bp  <- sum(width(reduce(GRanges(te$chrom, IRanges(te$start, te$end)))))   # same 1-based convention as te_gr below
 fwrite(data.table(genome_bp = gen_len, merged_repeat_bp = rep_bp,
@@ -59,9 +66,9 @@ fwrite(data.table(genome_bp = gen_len, merged_repeat_bp = rep_bp,
        file.path(DAT, "te_genome_fraction.tsv"), sep = "\t")
 cat(sprintf("  repeats cover %.1f%% of the chr1-31+mt assembly (%d of %.0f bp, merged)\n",
             100 * rep_bp / gen_len, rep_bp, as.numeric(gen_len)))
-# Collapse class_family to the five scored classes. NOTE: copies that match none
-# of the five prefixes ("Unknown") are DROPPED here from all downstream analyses
-# (they were still counted in the repeat fraction above).
+
+# Step 2.2 - Collapse class_family to the five scored classes
+# Copies matching none of the five prefixes are dropped from all downstream analyses.
 cf <- as.character(te$class_family)
 te[, class := ifelse(grepl("^LINE", cf), "LINE", ifelse(grepl("^SINE", cf), "SINE",
               ifelse(grepl("^LTR", cf), "LTR", ifelse(grepl("^DNA", cf), "DNA",
@@ -74,6 +81,7 @@ te <- te[class %in% names(COL_CLASS)]
 te[, te_uid := .I]
 te_gr <- GRanges(te$chrom, IRanges(te$start, te$end), te_uid = te$te_uid)
 
+# Step 2.3 - WGBS cov>=5 bsseq, per-condition M and Cov sums; GFF gene set
 bs <- readRDS(file.path(B02, "bsseq_cov5_chrmt.rds"))
 chrs <- as.character(seqnames(bs)); bs <- bs[chrs %in% keep_chr, ]
 gr <- granges(bs)
@@ -82,14 +90,11 @@ samp <- sampleNames(bs); cond <- ifelse(grepl("^A", samp), "Amputated", "Control
 mc <- rowSums(M[, cond == "Control", drop = FALSE]); cc <- rowSums(Cv[, cond == "Control", drop = FALSE])
 ma <- rowSums(M[, cond == "Amputated", drop = FALSE]); ca <- rowSums(Cv[, cond == "Amputated", drop = FALSE])
 gff <- readRDS(file.path(B01, "gff_chrmt.rds"))
-# LOCKED form: no biotype filter on the gene set, so "Gene-overlapping" includes
+# No biotype filter on the gene set: 'Gene-overlapping' includes overlaps with pseudogenes.
 gene_gr <- reduce(gff[gff$type == "gene"])
 
-# ---- [2] Per-TE-copy WGBS methylation (pooled per condition) ----------------
-# foverlaps CpGs onto TE copies; per copy: beta_ctrl/beta_amp (summed M over
-# summed Cov within condition), kept only with >= 3 covered CpGs.
-# Writes data/te_methylation_per_copy.tsv (with coordinates, so a reviewer can
-# locate any copy).
+# Step 3 - Per-TE-copy WGBS methylation, pooled per condition
+# Per copy: beta = summed M / summed Cov within condition; copies with >= 3 covered CpGs are kept.
 cat("[2] per-TE methylation\n")
 cpg_dt <- data.table(chr = as.character(seqnames(gr)), start = start(gr), end = start(gr),
                      mc = mc, cc = cc, ma = ma, ca = ca)
@@ -98,11 +103,8 @@ setkey(te_dt, chr, start, end); setkey(cpg_dt, chr, start, end)
 ov <- foverlaps(cpg_dt, te_dt, nomatch = 0L)
 per_te <- ov[, .(beta_ctrl = sum(mc)/pmax(sum(cc),1), beta_amp = sum(ma)/pmax(sum(ca),1),
                  n_cpg = .N), by = te_uid][n_cpg >= 3]
-# kimura_div is the RAW K2P, kimura_div_CpG is the CpG-ADJUSTED one. Analyse on
-# the adjusted column: methylation-driven CpG->TpG deamination inflates the raw
-# estimate with a component of the response (adjusted makes every class rho
-# negative, e.g. LTR +0.008 -> -0.009). Raw is kept as the kimura_unadj
-# sensitivity rows only, never as a result.
+# Source column names are swapped: kimura_div is the raw K2P and kimura_div_CpG the CpG-adjusted
+# estimate. Analyses use the adjusted column; the raw one is kept only for sensitivity rows.
 te_loc <- te[, .(te_uid, class, kimura = kimura_div_CpG, kimura_unadj = kimura_div)]
 te_loc[, loc := ifelse(overlapsAny(te_gr, gene_gr)[match(te_uid, te$te_uid)],
                        "Gene-overlapping", "Intergenic")]
@@ -114,24 +116,19 @@ per_te[, beta_pooled := (beta_ctrl*1 + beta_amp*1)/2]   # simple average of the 
 fwrite(per_te, file.path(DAT, "te_methylation_per_copy.tsv"), sep = "\t")
 cat(sprintf("  %s TE copies with >=3 CpGs\n", format(nrow(per_te), big.mark = ",")))
 
-# Ridge y-axis class order top -> bottom, shared by [3] and [4]. NO violins on
-# 04_TEs (rule).
+# Ridge y-axis class order, top to bottom, shared by Steps 4 and 5.
 ridge_classes <- c("LTR", "RC", "LINE", "DNA", "SINE")
 
-# ---- [3] WGBS tail supplementary panels figS4a-c + non-conversion floor -----
-# The three WGBS tail panels (class ridges, location ridges, Kimura quintile
-# Also computes the bisulfite non-conversion floor and its TSV.
-
-# figS4a: ridges by class, Control | Amputated
-long <- data.table::melt(per_te, id.vars = c("te_uid","class","loc"),   # namespaced (masked-generic rule)
+# Step 4 - WGBS tail supplementary panels (figS4) and the non-conversion floor
+# Step 4.1 - figS4a: per-copy methylation ridges by class, Control vs Amputated
+long <- data.table::melt(per_te, id.vars = c("te_uid","class","loc"),
              measure.vars = c("beta_ctrl","beta_amp"),
              variable.name = "condition", value.name = "beta")
 long[, condition := factor(ifelse(condition == "beta_ctrl","Control","Amputated"),
                            levels = c("Control","Amputated"))]
 long[, class := factor(class, levels = rev(ridge_classes))]
-# standard proxy is mean CHH methylation from the Bismark splitting reports
-# (CHH is essentially absent in invertebrates). Betas at or below this floor are
-# indistinguishable from conversion error. Parsed here, never hard-coded.
+# Non-conversion floor: no spike-in, so mean CHH methylation from the Bismark splitting reports
+# is the proxy (CHH methylation is essentially absent in invertebrates).
 SPLIT_DIR <- "/mnt/data/alfredvar/jmiranda/50-Genoma/51-Metilacion/09_methylation_calls"
 chh <- vapply(c("C1","C2","A1","A2"), function(s) {
   f <- file.path(SPLIT_DIR, sprintf("%s_paired_bismark_bt2_pe.deduplicated_splitting_report.txt", s))
@@ -140,11 +137,10 @@ chh <- vapply(c("C1","C2","A1","A2"), function(s) {
   as.numeric(sub("%.*", "", sub(".*:\\s*", "", l)))
 }, numeric(1))
 nonconv <- mean(chh, na.rm = TRUE)                       # percent
+# The floor is a QC quantity written to non_conversion_rate.tsv; it is not drawn on any figure.
 fwrite(data.table(sample = names(chh), chh_pct = chh), file.path(DAT, "non_conversion_rate.tsv"), sep = "\t")
 cat(sprintf("  non-conversion proxy (mean CHH): %.2f%%  [%s]\n", nonconv,
             paste(sprintf("%s %.1f", names(chh), chh), collapse = ", ")))
-# quantity, not a result. It stays computed + written to non_conversion_rate.tsv
-# so Methods/Limitations can quote it.
 
 pa <- ggplot(long, aes(beta*100, class, fill = class)) +
   geom_density_ridges(alpha = 0.85, scale = 1.4, colour = "white", linewidth = 0.2) +
@@ -156,9 +152,8 @@ pa <- ggplot(long, aes(beta*100, class, fill = class)) +
   theme_pub()
 save_supp(pa, "figS4_te_methylation_by_class_wgbs_tail", 6.0, 3.4)
 
-# figS4b: ridges, gene-overlapping vs intergenic. Draw-order trick: the local
-# copy puts Gene-overlapping LAST in the loc factor so ggridges draws it on top;
-# `breaks` keeps it first in the legend. per_te's own loc order stays intact.
+# Step 4.2 - figS4b: ridges by class, gene-overlapping vs intergenic
+# Draw order: Gene-overlapping last in the factor so ggridges draws it on top; `breaks` keeps it first in the legend.
 per_te[, class := factor(class, levels = rev(ridge_classes))]
 pb_dt <- copy(per_te)
 pb_dt[, loc := factor(loc, levels = c("Intergenic", "Gene-overlapping"))]  # gene-overlapping on top
@@ -172,9 +167,9 @@ pb <- ggplot(pb_dt, aes(beta_pooled*100, class, fill = loc)) +
   theme_pub() + theme(legend.position = "right")
 save_supp(pb, "figS4_te_methylation_by_class_location_wgbs_tail", 6.5, 3.6)
 
-# figS4c: methylation by class x location x age. Kimura divergence is a
-# PERCENTAGE from the family consensus (higher = older), binned into 5 equal-N
-# QUINTILES labelled Q1..Q5; actual % ranges go to the log for the caption
+# Step 4.3 - figS4c: methylation by class x location x Kimura quintile
+# Kimura divergence (% from the family consensus, higher = older) is cut into five equal-N quintiles
+# within the WGBS copy set; the ranges are written for the figure caption.
 age <- copy(per_te)[!is.na(kimura)]
 qlo <- quantile(age$kimura, probs = seq(0.0, 0.8, 0.2))
 qhi <- quantile(age$kimura, probs = seq(0.2, 1.0, 0.2))
@@ -182,12 +177,10 @@ qbrk <- c(-Inf, qhi[1:4], Inf)                       # 6 breaks -> 5 quintile bi
 qlab <- sprintf("Q%d", 1:5)                          # x-axis: quintile label only (Q1=youngest)
 qrng <- sprintf("Q%d %.1f-%.1f%%", 1:5, qlo, qhi)    # quintile -> actual Kimura % range
 age[, age_bin := cut(kimura, breaks = qbrk, labels = qlab, include.lowest = TRUE)]
-# ranges go to the log for the manuscript caption (no longer drawn on the figure)
 cat(sprintf("  Kimura quintile ranges: %s\n", paste(qrng, collapse = "; ")))
 qr_wgbs <- data.table(platform = "WGBS_tail", quintile = qlab, kimura_lo = as.numeric(qlo), kimura_hi = as.numeric(qhi),
                       n = as.integer(table(age$age_bin)[qlab]))
-# Correlation table (descriptive coefficients, no test here; tests live in [5]):
-# Kimura vs beta, overall and per class -> te_kimura_methylation_correlation.tsv
+# Descriptive correlation coefficients only; the tests are in Step 6.
 kim_cor <- rbind(
   data.table(class = "All", pearson_r = cor(age$kimura, age$beta_pooled, use = "complete.obs"),
              spearman_rho = cor(age$kimura, age$beta_pooled, method = "spearman", use = "complete.obs"), n = nrow(age)),
@@ -195,7 +188,6 @@ kim_cor <- rbind(
           spearman_rho = cor(kimura, beta_pooled, method = "spearman", use = "complete.obs"), n = .N), by = class])
 fwrite(kim_cor, file.path(DAT, "te_kimura_methylation_correlation.tsv"), sep = "\t")
 cat("  Kimura vs methylation correlation (Pearson r / Spearman rho):\n"); print(kim_cor)
-# x-axis reads Q1 -> Q5 left to right = youngest (low Kimura) -> oldest (high Kimura)
 agg <- age[!is.na(age_bin), .(beta = mean(beta_pooled, na.rm = TRUE),
                               se = sd(beta_pooled, na.rm = TRUE)/sqrt(.N), n = .N),
            by = .(class, loc, age_bin)]
@@ -209,28 +201,20 @@ pc <- ggplot(agg, aes(age_bin, beta*100, fill = loc)) +
   scale_fill_manual(values = COL_LOC, name = "Genomic location") +
   labs(x = "TE age (Kimura-divergence quintile)", y = "Per-copy mean CpG methylation β (%)",
        title = "TE methylation and Kimura Divergence",
-       # figure — quintile ranges and the floor belong in the manuscript caption
        caption = NULL) +
   theme_pub() + theme(axis.text.x = element_text(size = 7, angle = 45, hjust = 1),
                       plot.caption = element_text(hjust = 1, size = 6.5, colour = "grey30"))
 save_supp(pc, "figS4_te_age_by_class_location_wgbs_tail", 9.0, 3.0)
 
-# ---- [4] PacBio HiFi bodywall arm — THE MAIN TE FIGURES ---------------------
-# HiFi bodywall panels ARE fig4a/b/c (MAIN, exactly 3, locked manifest) and the
-# WGBS tail versions above are supplementary. Same forms/palettes/titles as the
-# approved figures; only the data source and destination folder moved.
-#   (1) TISSUE: HiFi = bodywall (2 intact slugs), WGBS = tail — every per-copy
-#       cross-platform comparison below is also CROSS-TISSUE.
-#   (2) The 0.28% bisulfite floor does NOT apply to kinetic calls: jasmine 5mC
-#       has its own error model (vendor per-call FPR ~11%, averaged at ~18x),
-#       so near-zero HiFi values are not interpretable against the WGBS floor.
-# Source object = the SAME CpG set as fig2d's Bodywall arm: methbat 5mC pileup,
-# strand-combined dyads, cov>=5 in BOTH slugs, jasmine 26.1.3, WGBS r = 0.95.
+# Step 5 - PacBio HiFi bodywall arm: main fig4a-fig4c and platform comparisons
+# HiFi = bodywall of two intact slugs, WGBS = tail: every cross-platform comparison is also cross-tissue.
+# The bisulfite non-conversion floor does not apply to the HiFi kinetic calls, which have their own error model.
+# Step 5.1 - Per-copy HiFi methylation on the module 02 bodywall CpG set
 cat("[4] PacBio HiFi bodywall TE arm\n")
 hifi <- readRDS(file.path(B02, "hifi_bodywall_cpg_persample_chrmt.rds"))
 hifi <- hifi[chr %in% keep_chr]
-# pool the two bodywall slugs (summed modified reads over summed coverage, the
-# same estimator as the WGBS per-condition betas); per-CpG core stays data.table
+# Same CpG set as the module 02 bodywall arm (methbat pileup, cov >= 5 in both slugs). Pool the two slugs:
+# summed modified reads over summed coverage, the same estimator as the WGBS betas.
 hifi_dt <- hifi[, .(chr, start = pos, end = pos, mod = mod_1 + mod_2, cov = cov_1 + cov_2)]
 setkey(hifi_dt, chr, start, end)
 ovh <- foverlaps(hifi_dt, te_dt, nomatch = 0L)
@@ -244,8 +228,9 @@ cat(sprintf("  %s TE copies with >=3 HiFi CpGs vs %s on WGBS cov5 (%.2fx)\n",
             format(nrow(per_te_h), big.mark = ","), format(nrow(per_te), big.mark = ","),
             nrow(per_te_h) / nrow(per_te)))
 
-# platform vs all annotated copies (young near-identical copies multimap on
-# short reads, so the HiFi gain should concentrate in the low-Kimura bins).
+# Step 5.2 - Platform coverage by Kimura bin, copy counts and per-copy agreement
+# Fixed Kimura bins (0-5, ..., >25). Young near-identical copies multimap on short reads,
+# so the HiFi gain should concentrate in the low-Kimura bins.
 kb   <- c(0, 5, 10, 15, 20, 25, Inf)
 klab <- c("0-5", "5-10", "10-15", "15-20", "20-25", ">25")
 cov_kim <- rbind(
@@ -262,7 +247,7 @@ cov_kim[, `:=`(pct_wgbs = 100 * WGBS_tail / annotated_total,
 fwrite(cov_kim, file.path(DAT, "te_platform_coverage_by_kimura.tsv"), sep = "\t")
 cat("  quantifiable copies per Kimura bin (annotated / WGBS / HiFi):\n"); print(cov_kim)
 
-# per-class copy counts + cross-platform per-copy agreement (TSVs + log only;
+# Per-class copy counts and per-copy agreement between platforms (tables and log only).
 joint <- merge(per_te[, .(te_uid, beta_pooled, n_cpg)],
                per_te_h[, .(te_uid, beta_bw, n_cpg_hifi, class, kimura, loc)], by = "te_uid")
 cmp <- rbind(
@@ -284,7 +269,7 @@ fwrite(agree, file.path(DAT, "te_platform_percopy_agreement.tsv"), sep = "\t")
 cat("  cross-platform per-copy agreement (WGBS tail vs HiFi bodywall; cross-tissue):\n")
 print(agree)
 
-# fig4a (MAIN): per-copy methylation ridges by class, bodywall HiFi
+# Step 5.3 - fig4a: per-copy methylation ridges by class, bodywall HiFi
 ph_dt <- copy(per_te_h)
 ph_dt[, class := factor(class, levels = rev(ridge_classes))]
 pha <- ggplot(ph_dt, aes(beta_bw * 100, class, fill = class)) +
@@ -296,9 +281,7 @@ pha <- ggplot(ph_dt, aes(beta_bw * 100, class, fill = class)) +
   theme_pub()
 save_fig(pha, "fig4a_te_methylation_by_class_bodywall", 3.9, 3.16)
 
-# fig4b (MAIN): gene-overlapping vs intergenic ridges, bodywall HiFi. Same form
-# and palette as the WGBS panel it replaces, including the draw-order trick that
-# puts the green gene-overlapping ridge in front while the legend lists it first.
+# Step 5.4 - fig4b: ridges by class and location, bodywall HiFi
 phb_dt <- copy(per_te_h)
 phb_dt[, class := factor(class, levels = rev(ridge_classes))]
 phb_dt[, loc := factor(loc, levels = c("Intergenic", "Gene-overlapping"))]
@@ -310,15 +293,11 @@ phb <- ggplot(phb_dt, aes(beta_bw * 100, class, fill = loc)) +
   labs(x = "Per-copy mean CpG methylation β (%)", y = "TE class",
        title = "TE methylation: gene-overlapping vs intergenic") +
   theme_pub() +
-  # title down to base size 9 and canvas widened 3.0 -> 3.6 in so both fit
   theme(legend.position = "right", plot.title = element_text(size = 9, face = "bold"))
 save_fig(phb, "fig4b_te_methylation_by_class_location_bodywall", 3.6, 1.66)
 
-# fig4c (MAIN): Kimura quintiles x class x location on the HiFi copy set.
-# Quintiles are recomputed WITHIN the HiFi set (equal-N convention), so bin
-# edges differ from the WGBS panel's; ranges are printed for the caption. Bin
-# count does not drive the result (quartiles/quintiles/deciles compared in
-# monotone in every class ([5] writes a per-class monotonicity flag).
+# Step 5.5 - fig4c: Kimura quintiles x class x location on the HiFi copy set
+# Quintiles are recomputed within the HiFi set (equal-N convention), so bin edges differ from the WGBS panel.
 age_h <- copy(per_te_h)[!is.na(kimura)]
 qlo_h <- quantile(age_h$kimura, probs = seq(0.0, 0.8, 0.2))
 qhi_h <- quantile(age_h$kimura, probs = seq(0.2, 1.0, 0.2))
@@ -355,17 +334,12 @@ phc <- ggplot(agg_h, aes(age_bin, beta * 100, fill = loc)) +
   theme_pub() + theme(axis.text.x = element_text(size = 7, angle = 45, hjust = 1))
 save_fig(phc, "fig4c_te_age_by_class_location_bodywall", 7.0, 2.4)
 
-# ---- [5] Statistics quoted in the text (both platforms) ---------------------
-# Every TE number the manuscript quotes is computed HERE (project rule: nothing
-# in the paper without a producing script). Layout statistic|scope|value:
-#   te_statistics_bodywall.tsv (HiFi, MAIN fig4) and te_statistics_wgbs_tail.tsv
-#   (WGBS, supp figS4), plus te_condition_contrast_wgbs_tail.tsv (WGBS only).
-# Tests, all two sided: location by Mann-Whitney (rank biserial r = 2U/(n1 n2)-1,
-# positive = gene-overlapping ranks higher); beta > 0.5 share by Fisher (OR + CI);
-# Kimura vs beta by Spearman (asymptotic P); Q5-vs-Q1 quintile contrast by
-# pct_copies_overlapping_another row): P values are descriptive, the text quotes
-# the effect sizes.
+# Step 6 - Statistics quoted in the text (both platforms) and condition contrast
 cat("[5] TE statistics for the text\n")
+
+# Step 6.1 - te_stats(): one statistic | scope | value table per platform
+# All tests two-sided. Per-copy rows are not independent (see pct_copies_overlapping_another),
+# so P values are descriptive and the text quotes effect sizes.
 te_stats <- function(dt, beta_col, agg_tab, binned) {
   d <- copy(dt)[!is.na(get(beta_col))]
   d[, beta := get(beta_col)]
@@ -377,9 +351,7 @@ te_stats <- function(dt, beta_col, agg_tab, binned) {
   row <- function(statistic, scope, value) data.table(statistic = statistic, scope = scope, value = as.numeric(value))
   loc2 <- c("Gene-overlapping", "Intergenic")
   out <- rbindlist(list(
-    # non-independence figure the Methods quote: fraction of THIS universe's copies
-    # overlapping another copy of the same universe (computed per platform; the old
-    # single hard-coded 56.8%, which fit no universe, is retired)
+    # Fraction of copies overlapping another copy of the same universe, computed per platform.
     if (all(c("chrom", "start", "end") %in% names(d)))
       row("pct_copies_overlapping_another", "All",
           100 * mean(countOverlaps(GRanges(d$chrom, IRanges(d$start, d$end))) > 1L)),
@@ -412,7 +384,6 @@ te_stats <- function(dt, beta_col, agg_tab, binned) {
     row("point_biserial_r", "Gene-overlapping vs Intergenic", cor(as.numeric(d$loc == "Gene-overlapping"), d$beta)),
     row("median_beta_of_copies_gt_0.5", "All", median(d[high == TRUE, beta])),
     row("pct_kimura_gt_50", "All", 100 * mean(d$kimura > 50, na.rm = TRUE)))   # saturated K2P estimates (short fragments)
-  # Kimura divergence vs methylation: Spearman rho with P, all copies, per class, per class x location
   k <- d[!is.na(kimura)]
   sp <- function(x) { ct <- cor.test(x$kimura, x$beta, method = "spearman", exact = FALSE)   # STAT TEST: Spearman rho, asymptotic P
                       list(rho = unname(ct$estimate), P = ct$p.value, n = nrow(x)) }
@@ -426,7 +397,6 @@ te_stats <- function(dt, beta_col, agg_tab, binned) {
       by = .(class, loc)][, .(statistic, scope, value)],
     row("kimura_spearman_rho_range_by_class", "min", min(k[, cor(kimura, beta, method = "spearman"), by = class]$V1)),
     row("kimura_spearman_rho_range_by_class", "max", max(k[, cor(kimura, beta, method = "spearman"), by = class]$V1)),
-    # sensitivity: the same correlation on the RAW (CpG-inflated) Kimura estimate
     if ("kimura_unadj" %in% names(k)) rbindlist(list(
       row("kimura_adj_vs_raw_pearson_r", "All", cor(k$kimura, k$kimura_unadj, use = "complete.obs")),   # the r the Methods quote
     row("pct_kimura_gt_50_UNADJUSTED", "All", 100 * mean(k$kimura_unadj > 50, na.rm = TRUE)),
@@ -434,15 +404,11 @@ te_stats <- function(dt, beta_col, agg_tab, binned) {
       k[, row("kimura_spearman_rho_UNADJUSTED", as.character(.BY$class),
               cor(kimura_unadj, beta, method = "spearman", use = "complete.obs")), by = class][, .(statistic, scope, value)]))
     else NULL)
-  # oldest minus youngest quintile (Q5 - Q1) per class and location, from the fig4c bins
   q <- agg_tab[, .(value = beta[age_bin == "Q5"] - beta[age_bin == "Q1"],
                    monotone = as.numeric(all(diff(beta[order(as.character(age_bin))]) <= 0)),   # 1 = falls from Q1 to Q5 without a rise
                    n_q1 = n[age_bin == "Q1"], n_q5 = n[age_bin == "Q5"]), by = .(class, loc)]
-  # Q5 - Q1 above is a difference of BIN MEANS with no test; the proper test is
-  # Mann-Whitney of the oldest vs youngest quintile per class x location on the
-  # per-copy values (rank biserial r POSITIVE when the oldest rank higher, so an
-  # age-driven loss is negative; cells with < 20 copies in either bin return NA).
-  # n runs to 10^5 and rows are not independent: P descriptive, text quotes r.
+  # Mann-Whitney of the oldest vs youngest quintile on per-copy values; r > 0 when older copies rank higher,
+  # so an age-driven loss is negative; cells with < 20 copies in either bin return NA.
   bb <- copy(binned)[!is.na(age_bin)]
   bb[, b := get(beta_col)]
   bb <- bb[!is.na(b) & age_bin %in% c("Q1", "Q5")]
@@ -465,20 +431,19 @@ te_stats <- function(dt, beta_col, agg_tab, binned) {
     q[, row("quintile_Q5_n", paste(.BY$class, .BY$loc, sep = " | "), n_q5), by = .(class, loc)][, .(statistic, scope, value)])
   out[]
 }
+
+# Step 6.2 - Both platforms; copy counts; cross-platform floor and concordance
 stats_h <- te_stats(per_te_h, "beta_bw", agg_h, age_h)
 fwrite(stats_h, file.path(DAT, "te_statistics_bodywall.tsv"), sep = "\t")
 stats_w <- te_stats(per_te, "beta_pooled", agg, age)
 fwrite(stats_w, file.path(DAT, "te_statistics_wgbs_tail.tsv"), sep = "\t")
-# copy counts against the classified annotation (what fraction of copies each platform quantifies)
 counts <- data.table(statistic = c("n_classified_copies", "pct_classified_copies_quantified_wgbs_tail",
                                    "pct_classified_copies_quantified_hifi_bodywall", "n_copies_quantified_on_both_platforms"),
                      scope = "All",
                      value = c(nrow(te), 100 * nrow(per_te) / nrow(te), 100 * nrow(per_te_h) / nrow(te), nrow(joint)))
 fwrite(counts, file.path(DAT, "te_copy_counts.tsv"), sep = "\t")
-# Cross-platform floor and concordance on the copies both platforms quantify:
-# the HiFi detection floor = what the kinetic caller reads where bisulfite calls
-# beta exactly 0; the bisulfite floor = the CHH rate (`chh` above).
-# The pct_wgbs_copies_below_conversion_floor row is computed over ALL WGBS-quantified
+# HiFi floor = what the kinetic caller reads where bisulfite gives beta exactly 0; the last row
+# (share below the conversion floor) is computed over all WGBS-quantified copies.
 fl <- joint[beta_pooled == 0, beta_bw]
 floor_dt <- data.table(
   statistic = c("n_copies_wgbs_beta_0", "hifi_median_beta_at_wgbs_beta_0", "hifi_q25_beta_at_wgbs_beta_0",
@@ -499,9 +464,8 @@ print(stats_h[scope %in% c("All", "Gene-overlapping", "Intergenic", "Gene-overla
 cat("  WGBS tail headline statistics:\n")
 print(stats_w[scope %in% c("All", "Gene-overlapping", "Intergenic", "Gene-overlapping vs Intergenic")])
 
-# WGBS tail control vs amputated per copy (backs the "does not change during
-# blastema formation" sentence): paired-by-copy deltas, shares moving > 0.1/0.2
-# in either direction, paired Wilcoxon signed rank -> te_condition_contrast_wgbs_tail.tsv
+# Step 6.3 - WGBS tail control vs amputated per copy
+# Paired-by-copy deltas, shares moving by more than 0.1 / 0.2, and a paired Wilcoxon signed-rank test.
 cc_dt <- per_te[!is.na(beta_ctrl) & !is.na(beta_amp)]
 cc_dt[, delta := beta_amp - beta_ctrl]
 cond_all <- cc_dt[, .(class = "All", n = .N, mean_beta_ctrl = mean(beta_ctrl), mean_beta_amp = mean(beta_amp),
@@ -523,9 +487,6 @@ cond_tab <- rbind(cond_all, cond_cls)
 fwrite(cond_tab, file.path(DAT, "te_condition_contrast_wgbs_tail.tsv"), sep = "\t")
 cat("  WGBS tail control vs amputated per copy:\n"); print(cond_tab)
 
-# ---- [6] Provenance notes + sessionInfo -------------------------------------
-# (host-gene methylation by intron/exon structure, not TE methylation) and their
-# tables were deleted; do not restore. Manifest: MAIN = exactly 3 (fig4a-c, HiFi
-# versions, cited together in the manuscript as the single supplementary float fig:tewgbs.
+# Step 7 - Reproducibility: sessionInfo record
 writeLines(capture.output(sessionInfo()), file.path(BATCH, "sessionInfo_04_TEs.txt"))
 cat("[04_TEs] done\n")

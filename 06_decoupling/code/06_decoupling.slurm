@@ -1,15 +1,17 @@
 #!/bin/bash
 #SBATCH --job-name=06_decoupling
 #SBATCH --partition=defq
-#SBATCH --exclude=node09,node06  # local-xfs /scratch decoys, not BeeGFS (node06 found 2026-08-20)
+#SBATCH --exclude=node09,node06
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=48G
 #SBATCH --time=24:00:00
-#SBATCH --output=%x_%j.log
+#SBATCH --output=logs/%x_%j.log
 
-# silently depended on the submitting user's ~/.bashrc R_LIBS export.
+# Launcher for 06_decoupling/code/06_decoupling.R (methylation vs expression).
+# Submit from main/methylation_pipeline/: sbatch 06_decoupling/code/06_decoupling.slurm
+
 export R_LIBS="/mnt/data/alfredvar/rlopezt/rlib:/mnt/data/alfredvar/jmiranda/80-scripts/88-R-packages"
 set -euo pipefail
 export SCRATCH_JOB="/scratch/groups/alfredvar/$USER/job_$SLURM_JOB_ID"

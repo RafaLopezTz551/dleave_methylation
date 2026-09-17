@@ -1,16 +1,25 @@
 #!/usr/bin/env Rscript
+# 08_motifs.R
+# TF-motif enrichment in the D. laeve methylome: MethylSeekR UMR/LMR segmentation, monaLisa binned
+# enrichment along the LMR methylation-change gradient and across Weber promoter classes (slug and
+# human), and HOMER known-motif enrichment of UMR promoters, LMRs and DMRs.
+# Inputs: 01_genome_toolkit (genome_chrmt.rds, gff_chrmt.rds, jaspar_ortholog_bridge.tsv);
+#   02_landscape (bsseq_cov5_chrmt.rds); 03_promoters/dataset (GRCh38 reference);
+#   05_differential (dmrs_annotated.tsv); JASPAR2024 sqlite; TE annotation table; HOMER binaries.
+# Outputs: data/*.tsv (segments, CGIs, LMR tables, Weber and HOMER motif tables);
+#   objects/ (caches, HOMER runs, QC PDFs); figures/main/fig8_*; figures/supplementary/figS8_*
+# Run: sbatch 08_motifs/code/08_motifs.slurm from main/methylation_pipeline/
+
+# Step 1 - Setup: seed, minimal packages, paths, cache freshness rule, coverage filter
 set.seed(20260426)
-# attached in [0b], AFTER segmentation — attaching it first contaminates S4
-# a clean session segments fine).
+# Only the minimal stack is attached here; the monaLisa/TFBSTools/BSgenome stack is attached in
+# Step 4, after segmentation, because attaching it first breaks segmentUMRsLMRs (S4 dispatch)
 suppressPackageStartupMessages({
   library(data.table); library(GenomicRanges); library(IRanges); library(Biostrings)
 })
 PIPE   <- "/mnt/data/alfredvar/rlopezt/meth_paper/main/methylation_pipeline"
 B01    <- file.path(PIPE, "01_genome_toolkit/objects"); B02 <- file.path(PIPE, "02_landscape/objects")
-# Every cache below is reused ONLY when it is newer than each input it was computed from
-# (the PWM library from 01, the bsseq object from 02, the DMR table from 05, the JASPAR
-# sqlite); an older cache stops the run and asks to be deleted, so a rebuilt upstream can
-# never be scored silently with stale results.
+# A cache is reused only if newer than every input it was computed from; an older cache stops the run
 IN_BRIDGE <- file.path(PIPE, "01_genome_toolkit/data/jaspar_ortholog_bridge.tsv")
 IN_BSSEQ  <- file.path(B02, "bsseq_cov5_chrmt.rds")
 IN_DMRS   <- file.path(PIPE, "05_differential/data/dmrs_annotated.tsv")
@@ -21,27 +30,23 @@ fresh_cache <- function(path, inputs) {
                  paste(basename(inputs), collapse = ", ")), call. = FALSE)
   TRUE
 }
-B03D   <- file.path(PIPE, "03_promoters/data")             # currently UNUSED (08_motifs re-classifies Weber itself, §6a-bis)
+B03D   <- file.path(PIPE, "03_promoters/data")
 BATCH  <- file.path(PIPE, "08_motifs")
 OBJ <- file.path(BATCH, "objects"); DAT <- file.path(BATCH, "data")
 FIGM <- file.path(BATCH, "figures/main"); FIGS <- file.path(BATCH, "figures/supplementary")
 for (d in c(OBJ, DAT, FIGM, FIGS)) dir.create(d, showWarnings = FALSE, recursive = TRUE)
 unlink(list.files(FIGM, full.names = TRUE)); unlink(list.files(FIGS, full.names = TRUE))
-keep_chr <- c(paste0("chr", 1:31), "HiC_scaffold_1563")
-# every defining CpG must be well measured — require >=10x in ALL 4 samples, a
-# SUBSET of the project-wide cov>=5 bsseq_cov5 set (locked batches untouched).
-# Applied to BOTH the segmentation input [0a] and the per-condition deltaMeth [3]
-# so 08_motifs is internally consistent. cov10_keep() = the >=10-in-all-4 row mask.
+keep_chr <- c(paste0("chr", 1:31), "HiC_scaffold_1563")   # chr1-31 + mito scaffold
+# LMR coverage rule: every CpG must have >= 10 reads in all four samples (a subset of the cov >= 5
+# set used elsewhere); applied to the segmentation (Step 2) and the per-LMR change (Step 7)
 MINCOV <- 10L
 cov10_keep <- function(bs) rowSums(as.matrix(getCoverage(bs, type = "Cov")) >= MINCOV) == ncol(bs)
 
-# ---- [0a] MethylSeekR LMR/UMR segmentation (clean session, cached) -----------
-# Segments the POOLED tail methylome into UMRs/LMRs. Runs BEFORE the enrichment
-# stack ([0b]) — see the dispatch trap at the top. Segments are cached in objects/.
+# Step 2 - MethylSeekR UMR/LMR segmentation of the pooled tail methylome (cached)
 cat("[0] MethylSeekR LMR/UMR segmentation (before enrichment stack)\n")
 suppressPackageStartupMessages({ library(MethylSeekR); library(bsseq) })
-# getSeq method for our DNAStringSet genome, defined AFTER loading MethylSeekR so
-# our strand-aware, chromosome-clamped method wins (MethylSeekR counts CpGs with it).
+# getSeq method for the DNAStringSet genome, defined after MethylSeekR is attached so that this
+# strand-aware, chromosome-clamped version is the one MethylSeekR uses
 suppressMessages(setMethod("getSeq", "DNAStringSet", function(x, names, as.character = FALSE, ...) {
   gr <- names; chrs <- as.character(seqnames(gr))
   sl <- setNames(as.integer(width(x)), names(x))              # chromosome lengths
@@ -55,11 +60,8 @@ suppressMessages(setMethod("getSeq", "DNAStringSet", function(x, names, as.chara
 }))
 genome  <- readRDS(file.path(B01, "genome_chrmt.rds"))
 chr_len <- setNames(width(genome), names(genome))
-# sequence-orthology rewrite while `gff`/`gene_gr` stayed in use from §5b on —
-# the queued rerun would have crashed at §5b after the figure-dir unlink.
 gff <- readRDS(file.path(B01, "gff_chrmt.rds")); gene_gr <- gff[gff$type == "gene"]
-# Pooled cov10 methylome, built once: feeds the alpha/PMD check, calculateFDRs
-# ([0a2]) and — on a cache miss — the segmentation itself.
+# Pooled cov10 methylome: feeds the PMD check, calculateFDRs (Step 3) and the segmentation
 bs <- readRDS(file.path(B02, "bsseq_cov5_chrmt.rds"))
 chrs <- as.character(GenomeInfoDb::seqnames(bs)); bs <- bs[chrs %in% keep_chr, ]
 n0 <- nrow(bs); bs <- bs[cov10_keep(bs), ]                      # per-sample >=10x in all 4
@@ -69,39 +71,32 @@ gr <- granges(bs)
 M  <- as.matrix(getCoverage(bs, type = "M")); Cv <- as.matrix(getCoverage(bs, type = "Cov"))
 meth <- rowSums(M); cov <- rowSums(Cv)                         # pool all 4 samples (bulk tail)
 sl <- chr_len[keep_chr]
-# deeply covered (>200x) and ~0.3-3.9% methylated, the mito would emit organelle
-# "UMR/LMR" segments contaminating the fig9 bins and the HOMER LMR arm. The mito
-# stays in the descriptive figures (02_landscape) and main/analysis/mito/.
+# Mitochondrial CpGs are excluded from the segmentation only (deep coverage, near-zero methylation)
 nuc  <- as.character(seqnames(gr)) != "HiC_scaffold_1563"
 m <- GRanges(as.character(seqnames(gr))[nuc],
              IRanges(start(gr)[nuc], start(gr)[nuc]), T = cov[nuc], M = meth[nuc])
 GenomeInfoDb::seqlevels(m) <- keep_chr; GenomeInfoDb::seqlengths(m) <- sl
 
-# PMD check REQUIRED by MethylSeekR (Burger 2013) before segmenting: a UNIMODAL
-# alpha distribution = no PMDs, which licenses segmentUMRsLMRs WITHOUT the PMDs
-# argument. Method-justification QC, not a figure: written to objects/, stated in
-# methods_08_motifs.md.
+# PMD check required by MethylSeekR: a unimodal alpha distribution means no PMDs, so
+# segmentUMRsLMRs runs without the PMDs argument (QC PDF in objects/)
 alpha_qc <- file.path(OBJ, "qc_alpha_distribution_pmd_check.pdf")
 pdf(alpha_qc, width = 6, height = 5)
 try(MethylSeekR::plotAlphaDistributionOneChr(m = m, chr.sel = "chr1", num.cores = 1)); dev.off()
 cat("  PMD alpha check written to objects/qc_alpha_distribution_pmd_check.pdf (QC, not a figure)\n")
 
-# Segmentation (cached — the expensive step). PMDs argument omitted: the alpha
-# check shows the methylome is unimodal. nCpG.cutoff = 3 is a TESTED choice — the
-# [0a2] calculateFDRs grid returns FDR > 100% everywhere, so the vertebrate FDR
-# calibration is uninformative here (replaced the old "no CGI annotation" line,
-seg_cache <- file.path(OBJ, "methylseekr_segments_cov10_chrmt_gr.rds")   # cov-versioned: no stale cov5 reuse
+# nCpG.cutoff = 3: the FDR grid of Step 3 is uninformative here (FDR > 100 percent at every
+# cutoff), so the cutoff is kept as a tested choice; the UMR/LMR split is MethylSeekR's 30-CpG rule
+seg_cache <- file.path(OBJ, "methylseekr_segments_cov10_chrmt_gr.rds")   # cov-versioned cache
 if (fresh_cache(seg_cache, IN_BSSEQ)) {
   seg <- readRDS(seg_cache); cat("  reuse cached MethylSeekR segments\n")
 } else {
-  # segmentUMRsLMRs draws a QC smoothScatter at the end; give it a real PDF device.
+  # segmentUMRsLMRs draws a QC smoothScatter; give it a real PDF device
   seg_pdf <- file.path(OBJ, "methylseekr_segmentation_qc.pdf")
   seg <- segmentUMRsLMRs(m = m, meth.cutoff = 0.5, nCpG.cutoff = 3L,
                          myGenomeSeq = genome, seqLengths = sl, num.cores = 1, pdfFilename = seg_pdf)
   saveRDS(seg, seg_cache)
-  # non-atomic mcol that kills fwrite with "dimnames[[2]] subscript out of bounds"
-  # (the true cause of the long-standing fig9c failure — NOT MethylSeekR). Note the
-  # TSV is only refreshed on a cache miss: delete seg_cache to regenerate both.
+  # TSV built from atomic columns (as.data.frame(seg) carries a non-atomic mcol); refreshed on a
+  # cache miss only
   fwrite(data.table(chr = as.character(seqnames(seg)), start = start(seg), end = end(seg),
                     width = width(seg), type = as.character(seg$type),
                     nCG = seg$nCG, nCG_segmentation = seg$nCG.segmentation,
@@ -112,12 +107,10 @@ lmr_gr0 <- seg[seg$type == "LMR"]
 cat(sprintf("  segments: %d (LMR %d, UMR %d)\n",
             length(seg), sum(seg$type == "LMR"), sum(seg$type == "UMR")))
 
-# ---- [0a2] Takai-Jones CGI annotation + MethylSeekR calculateFDRs ------------
-# must be reproducible from the pipeline) — CGIs are RECOMPUTED from 01_genome_toolkit's
-# genome, never copied. Stringent Takai & Jones 2002 thresholds (GC >= 55%,
-# O/E >= 0.65, len >= 500 bp; designed to exclude repeats): vectorised 200-bp scan
-# via cumsums; runs of passing windows -> islands; islands < 100 bp apart merged
-# and re-tested island-wide (standard vectorised form of the original 1-bp trim).
+# Step 3 - Takai-Jones CGI annotation and MethylSeekR calculateFDRs grid
+# Takai and Jones 2002 thresholds (GC >= 55 percent, O/E >= 0.65, length >= 500 bp): 200-bp sliding
+# scan via cumulative sums; runs of passing windows form islands; islands < 100 bp apart are merged
+# and re-tested island-wide
 cat("[0a2] Takai-Jones CGI annotation + calculateFDRs\n")
 TE_TJ <- "/mnt/data/alfredvar/30-Genoma/32-Repeats/age_of_transposons/collapsed_te_age_data.tsv"
 W_CGI <- 200L; GC_MIN <- 0.55; OE_MIN <- 0.65; LEN_MIN <- 500L; GAP_MAX <- 100L
@@ -146,6 +139,7 @@ if (file.exists(cgi_rds)) {
     r <- rle(pass)
     ends_i <- cumsum(r$lengths); starts_i <- ends_i - r$lengths + 1L
     isl <- data.table(start = starts_i[r$values], end = ends_i[r$values] + W_CGI - 1L)
+    # data.table::shift is qualified because IRanges::shift masks it
     isl[, gap := start - data.table::shift(end, fill = -1e9L)]
     isl[, grp := cumsum(gap >= GAP_MAX)]
     isl <- isl[, .(start = min(start), end = max(end)), by = grp][, grp := NULL][]
@@ -169,7 +163,7 @@ cgi_dt[, .(chr, start = start - 1L, end,                    # BED: 0-based half-
   fwrite(file.path(DAT, "cgi_takai_jones.bed"), sep = "\t", col.names = FALSE)
 fwrite(cgi_dt, file.path(DAT, "cgi_takai_jones.tsv"), sep = "\t")
 
-# Repeat-overlap check (the stringent thresholds were designed against repeats).
+# Repeat overlap of the CGIs (the thresholds were designed to exclude repeats)
 te_tj  <- fread(TE_TJ)[chrom %in% unique(cgi_dt$chr)]
 te_gr  <- reduce(GRanges(te_tj$chrom, IRanges(te_tj$start, te_tj$end)))
 cgi_gr <- GRanges(cgi_dt$chr, IRanges(cgi_dt$start, cgi_dt$end))
@@ -185,9 +179,7 @@ cat(sprintf("  %s CGIs, %.1f Mb (%.2f%% of genome), median %d bp, %.1f%% bp in T
             100 * sum(cgi_dt$len) / sum(as.numeric(width(genome))),
             as.integer(median(cgi_dt$len)), 100 * ov_bp / sum(cgi_dt$len)))
 
-# calculateFDRs against the CGI mask on the same pooled cov10 methylome `m`.
-# The manuscript quotes this grid (FDR > 100% at every cutoff combination ->
-# nCpG.cutoff = 3 retained as a tested choice); see the log-line caveat below.
+# calculateFDRs against the CGI mask on the same pooled methylome
 GenomeInfoDb::seqlevels(cgi_gr) <- keep_chr
 GenomeInfoDb::seqlengths(cgi_gr) <- sl
 ncpu_tj <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "4"))
@@ -196,34 +188,24 @@ fdr_tj <- calculateFDRs(m = m, CGIs = cgi_gr, num.cores = ncpu_tj,
 fdr_dt <- as.data.table(as.table(fdr_tj$FDRs))
 setnames(fdr_dt, c("meth_cutoff", "n_cpg", "fdr_pct"))
 fwrite(fdr_dt, file.path(DAT, "methylseekr_fdr_table.tsv"), sep = "\t")
-# the printed value (and the TSV) before quoting the claim.
+# The '>100% everywhere' part of the log line is literal text; only the minimum FDR is computed
 cat(sprintf("  calculateFDRs: min FDR %.0f%% (>100%% everywhere) -> nCpG.cutoff = 3 retained\n",
             min(fdr_dt$fdr_pct, na.rm = TRUE)))
 rm(te_tj, te_gr, ov_bp, fdr_tj)
 
-# ---- [0b] enrichment stack — attached AFTER segmentation ---------------------
+# Step 4 - Attach the motif-enrichment stack and set the parallel backend
 suppressPackageStartupMessages({
   library(TFBSTools); library(monaLisa)               # PWMs read from the sqlite by path
   library(SummarizedExperiment); library(BiocParallel); library(BSgenome)
 })
 ncpu <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "4"))
-# "genome" (it SAMPLES background sequences, and the top-of-script set.seed does
-# NOT reach BiocParallel workers — it made the former §6g check non-reproducible).
-# All current runs use background = "otherBins" (no sampling), but the seed stays
-# on BOTH branches so any future genome-background run is deterministic.
+# RNGseed is required for reproducibility whenever calcBinnedMotifEnrR samples background
+# sequences; set.seed does not reach BiocParallel workers
 BPP  <- if (ncpu > 1) MulticoreParam(workers = min(ncpu, 8), RNGseed = 20260426L) else SerialParam(RNGseed = 20260426L)
 
-# ---- [1] JASPAR2024 animal PWMs + SEQUENCE-level ortholog filter -------------
-# All CORE motifs for the 4 JASPAR animal taxa (mollusks are not a JASPAR group),
-# keeping ONLY motifs whose TF has a D. laeve ortholog established BY SEQUENCE.
-# not true" — it inherits annotation naming artefacts, misses orthologs under other
-# loci spelt "Homeobox"; TEAD1 got LOC_00017790 by name vs LOC_00000911 by sequence).
-# Replacement chain (built in 01_genome_toolkit, see its README): JASPAR MATRIX_PROTEIN ->
-# UniProt canonical sequence -> DIAMOND reciprocal best hits vs the EviAnn proteome
-# (isoforms collapsed to locus) -> Pfam DBD licensing on BOTH sides (hmmscan
-# --cut_ga, the class-expected domain) -> gene-tree co-orthology for ambiguous loci.
-# vs 39.6% IRF) — a single threshold confuses divergence with non-orthology.
-# Per-pair evidence: 01_genome_toolkit/data/motif_to_dlaeve.tsv.
+# Step 5 - JASPAR2024 animal PWMs, sequence-orthology filter, HOMER motif library
+# All CORE motifs of the four JASPAR animal taxa, keeping only motifs whose TF has a D. laeve
+# ortholog established by sequence (bridge table built in 01_genome_toolkit)
 cat("[1] JASPAR2024, 4 animal taxa + SEQUENCE-level ortholog filter\n")
 JASPAR_SQLITE <- "/mnt/data/alfredvar/rlopezt/meth_paper/tools/jaspar/JASPAR2024.sqlite"
 stopifnot(file.exists(JASPAR_SQLITE))
@@ -231,39 +213,30 @@ pwms <- getMatrixSet(JASPAR_SQLITE, opts = list(matrixtype = "PWM",
           tax_group = c("vertebrates", "insects", "nematodes", "urochordates")))
 cat(sprintf("  %d JASPAR2024 animal PWMs (before ortholog filter)\n", length(pwms)))
 
-# The library is built by 01_genome_toolkit (runs BEFORE this batch); 08_motifs consumes it
-# and never rebuilds it — batches are strictly sequential, and the stopifnot means
-# it cannot silently fall back to anything else.
 SEQ_BRIDGE <- file.path(PIPE, "01_genome_toolkit", "data", "jaspar_ortholog_bridge.tsv")
 stopifnot(file.exists(SEQ_BRIDGE))
 seqb <- fread(SEQ_BRIDGE, sep = "\t")
 pwms_all     <- pwms                                    # KEEP the full animal set
-tf_names_all <- vapply(pwms_all, name, character(1))    # for the human filter (§6f)
+tf_names_all <- vapply(pwms_all, name, character(1))   # used by the human run (Step 19)
 mids_all     <- vapply(pwms_all, ID,   character(1))
-# every motif in the PWM set must be represented in the bridge, else the filter is silent
+# Every motif must be present in the bridge, otherwise the filter would be silent
 stopifnot(all(mids_all %in% seqb$motif_id))
 setkey(seqb, motif_id)
 keep <- seqb[.(mids_all)]$has_ortholog %in% c(TRUE, "TRUE")
-# the bridge IS the deliverable: copied to data/ under the canonical name so every
-# downstream consumer (10_tf_circuit, analysis/grn_graph, analysis/tf_dbd) reads this set
+# The filtered bridge is copied to data/ as the deliverable motif set
 fwrite(seqb[.(mids_all)], file.path(DAT, "jaspar_ortholog_bridge.tsv"), sep = "\t")
 pwms     <- pwms_all[keep]
 tf_names <- tf_names_all[keep]
 cat(sprintf("  %d PWMs kept (TF has a SEQUENCE-verified D. laeve ortholog)\n", length(pwms)))
 stopifnot(length(pwms) >= 20)
 
-# Convert the ortholog-filtered PWMs to a HOMER known-motif library so HOMER (§6e)
-# scores the SAME slug-ortholog set as monaLisa; HOMER's built-in "-mset
-# vertebrates" is wrong for an invertebrate (no ortholog filter).
+# The same ortholog-filtered PWMs are written as a HOMER known-motif library (Step 18)
 suppressPackageStartupMessages(library(universalmotif))
 homer_motifs <- file.path(OBJ, "jaspar_ortholog_homer.motif")
 homer_mots <- convert_motifs(pwms)
 
-# 🚨 HOMER THRESHOLD TRAP: write_homer() computes each motif's detection threshold
-# in LOG2 units but HOMER scores in NATURAL LOG, so the default is 1/ln(2) too
-# large — nothing clears it and HOMER silently reports 0 hits in target AND
-# background for EVERY motif, which reads as a clean null instead of a broken run
-# ourselves in natural-log units (0.8 x best possible score) as absolute values.
+# Detection thresholds are computed in natural-log units (0.8 x best possible score), because
+# write_homer() uses log2 while HOMER scores in natural log, which would yield zero hits
 homer_thr <- vapply(homer_mots, function(m) {
   ppm <- convert_type(m, "PPM")["motif"]              # 4 x L matrix of probabilities
   0.8 * sum(log(pmax(apply(ppm, 2, max), 1e-3) / 0.25))   # vs HOMER's uniform 0.25 background
@@ -273,10 +246,9 @@ write_homer(homer_mots, homer_motifs, overwrite = TRUE,
 cat(sprintf("  wrote %d ortholog-filtered motifs to HOMER format (%s); threshold %.1f-%.1f (natural log)\n",
             length(pwms), basename(homer_motifs), min(homer_thr), max(homer_thr)))
 
-# ---- [2] sequence helpers ----------------------------------------------------
-# prep_gr: resize each region to a common (>=200 bp) width centred on its midpoint,
-# trimmed to the chromosome — avoids a length bias between bins (vignette 4.4).
-# get_seqs: extract the (unstranded) sequences from the DNAStringSet genome.
+# Step 6 - Sequence helpers
+# prep_gr resizes regions to a common width (>= 200 bp) centred on the midpoint, trimmed to the
+# chromosome; get_seqs extracts unstranded sequences from the DNAStringSet genome
 prep_gr <- function(gr, w = NULL) {
   gr <- gr[as.character(seqnames(gr)) %in% keep_chr]
   seqlevels(gr) <- keep_chr; seqlengths(gr) <- chr_len[keep_chr]
@@ -293,14 +265,11 @@ get_seqs <- function(gr, prefix = "LMR") {
   names(out) <- sprintf("%s_%05d", prefix, seq_along(out)); out
 }
 
-# ---- [3] per-LMR methylation change (Amputated - Control) --------------------
-# LMRs were segmented on POOLED methylation [0a]; here each LMR is quantified
-# SEPARATELY in control (C1,C2) and amputated (A1,A2) -> deltaMeth = amp - ctrl.
-# Writes data/lmr_methylation_change.tsv. Same cov10 CpG set as the segmentation.
+# Step 7 - Per-LMR methylation change (amputated - control) on the cov10 CpG set
 cat("[3] per-LMR methylation change (Amp - Ctrl)\n")
 bs <- readRDS(file.path(B02, "bsseq_cov5_chrmt.rds"))
 bchr <- as.character(GenomeInfoDb::seqnames(bs)); bs <- bs[bchr %in% keep_chr, ]
-bs <- bs[cov10_keep(bs), ]                             # same >=10x-in-all-4 CpG set as segmentation (0a)
+bs <- bs[cov10_keep(bs), ]   # same cov10 CpG set as the segmentation
 cpg <- granges(bs)
 Mm <- as.matrix(getCoverage(bs, type = "M")); Cc <- as.matrix(getCoverage(bs, type = "Cov"))
 isA <- grepl("^A", sampleNames(bs))                    # A1,A2 amputated ; C1,C2 control
@@ -309,30 +278,26 @@ ma <- rowSums(Mm[,  isA, drop = FALSE]); ca <- rowSums(Cc[,  isA, drop = FALSE])
 ov <- findOverlaps(cpg, lmr_gr0); q <- queryHits(ov); s <- subjectHits(ov)
 pl <- data.table(lmr = s, mc = mc[q], cc = cc[q], ma = ma[q], ca = ca[q])
 pl <- pl[, .(beta_ctrl = sum(mc)/pmax(sum(cc), 1), beta_amp = sum(ma)/pmax(sum(ca), 1),
-             ncpg = .N, cov_per_cpg = (sum(cc) + sum(ca)) / .N),   # pooled depth per CpG, for the [4b] bin QC
+             ncpg = .N, cov_per_cpg = (sum(cc) + sum(ca)) / .N),   # pooled depth per CpG, for the bin QC
          by = lmr][ncpg >= 3]                           # enough CpGs to trust the change
 pl[, delta := beta_amp - beta_ctrl]
 lmr_use <- lmr_gr0[pl$lmr]; mcols(lmr_use) <- NULL
 lmr_use$beta_ctrl <- pl$beta_ctrl; lmr_use$beta_amp <- pl$beta_amp
 lmr_use$delta <- pl$delta; lmr_use$ncpg <- pl$ncpg
-lmr_use$cov_per_cpg <- pl$cov_per_cpg; lmr_use$width_bp <- width(lmr_use)   # kept for [4b]: prep_gr() resizes to a common width
+lmr_use$cov_per_cpg <- pl$cov_per_cpg; lmr_use$width_bp <- width(lmr_use)   # kept for the bin QC; prep_gr resizes to a common width
 cat(sprintf("  %d LMRs (>=3 CpGs); deltaMeth %.3f .. %.3f (median %.3f)\n",
             length(lmr_use), min(pl$delta), max(pl$delta), median(pl$delta)))
 fwrite(as.data.frame(lmr_use), file.path(DAT, "lmr_methylation_change.tsv"), sep = "\t")
 
-# ---- [4] bin LMRs by deltaMeth + monaLisa binned enrichment (vignette 4) -----
-# Equal-N bins along the deltaMeth gradient, background = "otherBins" (CpG/GC
-# adjusted) -> which motifs mark LMRs gaining vs losing methylation on amputation.
-# Writes data/lmr_motif_enrichment.tsv and (in [5]) the MAIN fig9 heatmap.
+# Step 8 - Bin LMRs by methylation change; monaLisa binned motif enrichment
+# Equal-N bins along the deltaMeth gradient, background = other bins (GC and CpG adjusted)
 cat("[4] bin LMRs by deltaMeth + calcBinnedMotifEnrR\n")
 lmr_p   <- prep_gr(lmr_use)                             # common-width, chrom-trimmed
 lmrseqs <- get_seqs(lmr_p, "LMR")
 nEl  <- max(100L, as.integer(length(lmr_p) / 7L))       # ~7 equal-N bins, >=100 each
 bins <- bin(x = lmr_p$delta, binmode = "equalN", nElement = nEl)
 cat("  bins along the methylation-change gradient:\n"); print(table(bins))
-# 01_genome_toolkit library rebuild DELETE this .rds (and the promoter/HOMER caches) or the
-# rerun silently reuses enrichments computed with the old motif set.
-se_rds <- file.path(OBJ, "lmr_deltameth_cov10_chrmt_se.rds")   # cov-versioned
+se_rds <- file.path(OBJ, "lmr_deltameth_cov10_chrmt_se.rds")   # cov-versioned cache
 if (fresh_cache(se_rds, c(IN_BRIDGE, IN_BSSEQ))) { se <- readRDS(se_rds); cat("  reuse cached SE\n") } else {
   se <- calcBinnedMotifEnrR(seqs = lmrseqs, bins = bins, pwmL = pwms,
                             background = "otherBins", BPPARAM = BPP, verbose = FALSE)
@@ -342,13 +307,11 @@ enr_dt <- as.data.table(assay(se, "log2enr")); setnames(enr_dt, paste0("log2enr.
 enr_dt[, `:=`(motif = rownames(se), tf = rowData(se)$motif.name)]
 fwrite(enr_dt, file.path(DAT, "lmr_motif_enrichment.tsv"), sep = "\t")
 
-# ---- [5] figure helpers + monaLisa figures -----------------------------------
-# save_plot writes each figure as .pdf + .png + .svg (project rule); the monaLisa
-# heatmap figures (MAIN fig9 + LMR diagnostics) follow, then [5b] localisation.
+# Step 9 - Figure helpers (saver, heatmap wrappers, motif bookkeeping)
 cat("[5] figures\n")
 suppressPackageStartupMessages({ library(ComplexHeatmap); library(grid) })
 save_plot <- function(dir, name, draw, w = 7, h = 9) {
-  # cairo_pdf, not pdf(): base pdf() degraded the Δ glyph in every .pdf variant
+  # cairo_pdf keeps the Greek glyphs intact
   grDevices::cairo_pdf(file.path(dir, paste0(name, ".pdf")), width = w, height = h); try(draw()); dev.off()
   png(file.path(dir, paste0(name, ".png")), width = w, height = h, units = "in", res = 150); try(draw()); dev.off()
   svglite::svglite(file.path(dir, paste0(name, ".svg")), width = w, height = h); try(draw()); dev.off()
@@ -356,8 +319,7 @@ save_plot <- function(dir, name, draw, w = 7, h = 9) {
 }
 show_obj <- function(p) { if (inherits(p, c("Heatmap", "HeatmapList"))) ComplexHeatmap::draw(p)
   else if (!is.null(p) && inherits(p, "gg")) print(p) else invisible(NULL) }
-# paper-wide ggplot theme matching 01_genome_toolkit — currently UNUSED (the §6e lollipop
-# figure it served was replaced by HOMER's own logos); kept, comments-only pass
+# Paper-wide ggplot theme
 theme_pub <- function() {
   ggplot2::theme_classic(base_size = 9, base_family = "sans") +
     ggplot2::theme(plot.title = ggplot2::element_text(size = 10, face = "bold"),
@@ -365,7 +327,7 @@ theme_pub <- function() {
                    legend.title = ggplot2::element_blank(),
                    panel.grid.major.y = ggplot2::element_line(linewidth = 0.25, colour = "grey90"))
 }
-# pick_sig: up to 80 significant motifs (FDR<0.05 in any bin), else top 25 by enrichment
+# pick_sig: up to 80 motifs significant (FDR < 0.05) in any bin, else the top 25 by significance
 pick_sig <- function(se_) {
   pj <- assay(se_, "negLog10Padj")
   sg <- which(apply(abs(pj), 1, function(x) max(x, 0, na.rm = TRUE)) > -log10(0.05))
@@ -373,45 +335,32 @@ pick_sig <- function(se_) {
   if (length(sg) > 80) sg <- sg[order(apply(pj[sg, , drop = FALSE], 1, max, na.rm = TRUE), decreasing = TRUE)][1:80]
   se_[sg, ]
 }
-# top_n_sig: cap a promoter heatmap at the N most significant rows so it reads as
-# squeezed the seqlogos; the top 10 carry the result — TFAP2A/TFAP2B dominate HCP).
-# Used only by the two Weber-class figures; the LMR gradient stays uncapped.
+# top_n_sig: cap a promoter heatmap at the 10 most significant rows
 TOP_PROMOTER <- 10L
 top_n_sig <- function(se_, n = TOP_PROMOTER) {
   if (nrow(se_) <= n) return(se_)
   best <- apply(assay(se_, "negLog10Padj"), 1, max, na.rm = TRUE)
   se_[order(best, decreasing = TRUE)[seq_len(n)], ]
 }
-# wrap a long title onto <=W-char lines so ComplexHeatmap's centred column_title
-# does not overflow the (narrow, right-shifted) heatmap body and clip on the left.
+# wrap_title: wrap a long column title so it is not clipped
 wrap_title <- function(s, width = 46) paste(strwrap(s, width = width), collapse = "\n")
 
-# draw_motif_hm: monaLisa enrichment heatmap with a bold title naming the sequence
-# set (plotMotifHeatmaps has no title arg -> doPlot=FALSE + draw(column_title)).
-# show_motif_GC = TRUE on every heatmap (vignette 4.4): lets the reader check by eye
-# whether enriched motifs merely match a skewed bin's GC — exactly the Weber case,
-# where HCP is high-GC BY DEFINITION.
+# draw_motif_hm: enrichment heatmap with a title (plotMotifHeatmaps has no title argument);
+# show_motif_GC lets the reader check whether enriched motifs merely track a bin's GC
 draw_motif_hm <- function(se_t, title, cluster = TRUE, dendro = FALSE) {
   ms <- max(2, ceiling(max(assay(se_t, "negLog10Padj"), na.rm = TRUE)))
   hl <- plotMotifHeatmaps(x = se_t, which.plots = c("log2enr", "negLog10Padj"), width = 1.6,
                           cluster = cluster, show_dendrogram = dendro, show_seqlogo = TRUE,
                           show_motif_GC = TRUE,
                           maxEnr = 2, maxSig = ms, width.seqlogo = 1.2, doPlot = FALSE)
-  # doPlot=FALSE returns a plain list of Heatmaps; concatenate to a HeatmapList first
+  # doPlot = FALSE returns a list of Heatmaps; concatenate to a HeatmapList first
   ComplexHeatmap::draw(Reduce(`+`, hl), column_title = wrap_title(title),
                        column_title_gp = grid::gpar(fontface = "bold", fontsize = 11),
-                       # generous L/R padding so a narrow (few-bin) heatmap's title and
-                       # motif labels are not clipped at the device edge
                        padding = grid::unit(c(2, 10, 4, 10), "mm"))
 }
 
-# Motif bookkeeping helpers.
-# label_ids: key every heatmap row on the JASPAR MATRIX ID as well as the TF name —
-#   JASPAR ships several matrices per TF (TFAP2A has 3, expected-CpG differing
-#   4-fold), so name-only rows are ambiguous and can legitimately disagree in sign.
-# collapse_similar: merge near-identical PWMs by similarity clustering, label "xN".
-#   Currently UNUSED (dedupe_by_tf replaced it for the promoter heatmaps); kept.
-# motif_comp: per-PWM composition (expected CpG, GC, length). UNUSED since the
+# label_ids keys each row on the JASPAR matrix ID as well as the TF name (JASPAR ships several
+# matrices per TF); collapse_similar and motif_comp are helpers not called below
 label_ids <- function(se_) {
   nm <- paste0(rowData(se_)$motif.name, " (", rownames(se_), ")")
   if (!is.null(rowData(se_)$n_similar)) nm <- ifelse(rowData(se_)$n_similar > 1,
@@ -432,8 +381,7 @@ collapse_similar <- function(se_, cutoff = 0.95) {
               nrow(se_), nrow(out), cutoff))
   out
 }
-# the promoter heatmaps: no "TFAP2A x2", yet TFAP2A and TFAP2B both shown when both
-# are enriched. Unlike collapse_similar it never merges DISTINCT TFs sharing a PWM.
+# dedupe_by_tf: one matrix per TF name (the most significant); distinct TFs are never merged
 dedupe_by_tf <- function(se_) {
   if (nrow(se_) < 2) return(se_)
   nm   <- rowData(se_)$motif.name
@@ -442,7 +390,7 @@ dedupe_by_tf <- function(se_) {
   cat(sprintf("  TF dedupe: %d matrices -> %d TFs (one matrix per TF name)\n", nrow(se_), length(keep)))
   se_[keep, ]
 }
-motif_comp <- function(se_) {                     # expected CpG / GC / length per PWM (unused, see above)
+motif_comp <- function(se_) {   # expected CpG / GC / length per PWM (not called)
   pfmL <- rowData(se_)$motif.pfm
   rbindlist(lapply(seq_along(pfmL), function(i) {
     m <- TFBSTools::Matrix(pfmL[[i]]); p <- sweep(m, 2, pmax(colSums(m), 1), "/")
@@ -453,26 +401,24 @@ motif_comp <- function(se_) {                     # expected CpG / GC / length p
   }))
 }
 
-# MAIN fig9: LMR enrichment heatmap, rows clustered by MOTIF SIMILARITY, seqlogos.
+# Step 10 - LMR motif heatmap (main fig8) and LMRs per bin
+# Rows clustered by motif similarity
 seSel <- pick_sig(se); hh <- max(6, 0.16 * nrow(seSel) + 2)
 SM  <- tryCatch(monaLisa::motifSimilarity(rowData(seSel)$motif.pfm, BPPARAM = BPP), error = function(e) NULL)
 hcl <- if (!is.null(SM) && nrow(seSel) >= 3) hclust(as.dist(1 - SM), method = "average") else TRUE
 save_plot(FIGM, "fig8_lmr_motif_enrichment",
           function() draw_motif_hm(label_ids(seSel), "LMR sequences — TF motifs across the methylation-change gradient",
                                    cluster = hcl, dendro = !isTRUE(hcl)), w = 8.6, h = hh * 0.8)
-          # long heterodimer row names (ELK1::HOXA1) and the legend titles
 
-# deparse(substitute(x)), which printed "lmr_p$delta" on the axis of a paper figure.
+# xlab must be given: plotBinDensity would otherwise print the expression on the axis
 save_plot(FIGS, "figS8_lmr_bin_density",
           function() plotBinDensity(lmr_p$delta, bins,
                                     xlab = "Methylation change (amputated - control)",
                                     main = "LMRs per ΔMeth bin"),
           w = 7, h = 5)
-# ---- [4b] Bin QC: are the extreme deltaMeth bins simply the noisiest LMRs? ---------
-# or the lowest coverage, the central-bin motif peak of fig8 could be a coverage
-# artefact. Per bin: n, median width, CpGs, pooled coverage per CpG, control beta, GC.
-# Kruskal-Wallis across the seven bins, and Mann-Whitney U with a rank-biserial effect
-# size for each extreme bin against the two central bins (3 + 4), where enrichment peaks.
+# Step 11 - LMR bin QC: are the extreme bins simply the noisiest LMRs?
+# Per bin: n, median width, CpGs, pooled coverage per CpG, control methylation, GC. Kruskal-Wallis
+# across bins; Mann-Whitney U with rank-biserial r for each extreme bin vs the central bins (3 + 4)
 cat("[4b] LMR bin QC\n")
 library(ggplot2)
 gcf <- as.numeric(letterFrequency(lmrseqs, "GC", as.prob = TRUE))
@@ -482,8 +428,7 @@ metrics <- c(width = "Width (bp)", ncpg = "CpGs per LMR", cov_per_cpg = "Pooled 
              beta_ctrl = "Control methylation", gc = "GC (%)")
 qc_sum <- qc[, c(list(n = .N), lapply(.SD, median)), by = bin, .SDcols = names(metrics)][order(bin)]
 fwrite(qc_sum, file.path(DAT, "lmr_bin_qc.tsv"), sep = "\t"); print(qc_sum)
-# Is the size of the methylation change itself tied to LMR composition? Spearman of |delta|
-# against each metric over all binned LMRs (a monotone confound would show here directly).
+# Spearman of |deltaMeth| against each metric over all binned LMRs
 qc[, abs_delta := abs(lmr_p$delta)]
 qc_rho <- rbindlist(lapply(names(metrics), function(m) {
   # STAT TEST: Spearman rank correlation of |deltaMeth| with the LMR metric, all binned LMRs
@@ -492,6 +437,7 @@ qc_rho <- rbindlist(lapply(names(metrics), function(m) {
 }))
 fwrite(qc_rho, file.path(DAT, "lmr_delta_vs_composition.tsv"), sep = "\t"); print(qc_rho)
 rbis <- function(x, y) {                                   # Mann-Whitney U + rank-biserial r = 2U/(n1 n2) - 1
+  # r > 0: the first group (extreme bin) has larger values than the central bins
   w <- suppressWarnings(wilcox.test(x, y)); c(p = w$p.value, r = 2 * unname(w$statistic) / (length(x) * length(y)) - 1)
 }
 nb <- max(qc$bin); central <- qc$bin %in% c(3L, 4L)
@@ -504,7 +450,7 @@ qc_test <- rbindlist(lapply(names(metrics), function(m) {
 }))
 qc_test[, `:=`(bin1_vs_central_fdr = p.adjust(bin1_vs_central_p, "BH"), bin7_vs_central_fdr = p.adjust(bin7_vs_central_p, "BH"))]
 fwrite(qc_test, file.path(DAT, "lmr_bin_qc_tests.tsv"), sep = "\t"); print(qc_test)
-qcl <- data.table::melt(qc, id.vars = "bin", measure.vars = names(metrics), variable.name = "metric", value.name = "value")  # namespaced (masked-generic rule)
+qcl <- data.table::melt(qc, id.vars = "bin", measure.vars = names(metrics), variable.name = "metric", value.name = "value")
 qcl[, metric := factor(metrics[as.character(metric)], levels = metrics)]
 p_qc <- ggplot(qcl, aes(factor(bin), value)) +
   geom_boxplot(outlier.size = 0.25, linewidth = 0.3, fill = "grey92") +
@@ -514,15 +460,13 @@ p_qc <- ggplot(qcl, aes(factor(bin), value)) +
                       panel.grid.major.y = element_blank())
 save_plot(FIGS, "figS8_lmr_bin_qc", function() print(p_qc), w = 8.6, h = 2.4)
 
-# SUPP: per-bin LMR sequence composition (GC fraction + dinucleotide frequency)
+# Step 12 - Supplementary LMR figures: per-bin composition, full heatmap, segment overview
 if ("plotBinDiagnostics" %in% getNamespaceExports("monaLisa")) {
   save_plot(FIGS, "figS8_lmr_bindiag_GC",    function() show_obj(plotBinDiagnostics(lmrseqs, bins, "GCfrac")),    w = 6, h = 4.5)
   save_plot(FIGS, "figS8_lmr_bindiag_dinuc", function() show_obj(plotBinDiagnostics(lmrseqs, bins, "dinucfreq")), w = 7, h = 6)
 }
-# SUPP: LMR full significant-motif enrichment heatmap (default hierarchical clustering)
 save_plot(FIGS, "figS8_lmr_full_enrichment",
           function() draw_motif_hm(label_ids(seSel), "LMR sequences — all significant motifs (FDR<0.05)"), w = 7.5, h = hh)
-# SUPP: MethylSeekR LMR/UMR overview (segment counts, methylation change, widths)
 save_plot(FIGS, "figS8_lmr_overview", function() {
   op <- par(mfrow = c(1, 3), mar = c(4, 4, 2, 1)); on.exit(par(op))
   barplot(table(factor(seg$type, levels = c("UMR", "LMR"))), col = c(UMR = "#0072B2", LMR = "#009E73"),
@@ -533,11 +477,9 @@ save_plot(FIGS, "figS8_lmr_overview", function() {
        main = "LMR width", xlab = "log10(width, bp)")
 }, w = 10, h = 4)
 
-# ---- [5b] LMR / UMR genomic location (bar + pie) -----------------------------
-# One gene feature per region by priority Promoter (2 kb upstream) > Exon > Intron
-# > Intergenic — a reporting convention so each region counts once, NOT a ranking
-# of regulatory plausibility ("Intron" is not "non-regulatory": intronic enhancers
-# are the rule). Stated in methods_08_motifs.md and the caption.
+# Step 13 - LMR / UMR genomic location (bar and pie)
+# One feature per region by priority Promoter (2 kb upstream) > Exon > Intron > Intergenic, a
+# reporting convention so that each region counts once
 cat("[5b] LMR / UMR genomic location (bar + pie)\n")
 exon_r <- reduce(granges(gff[gff$type == "exon"]))
 prom_r <- reduce(trim(suppressWarnings(promoters(gene_gr, 2000, 0))))     # 2 kb upstream
@@ -550,7 +492,7 @@ feat_of <- function(x) {                       # one feature per region, by prio
   f[overlapsAny(x, prom_r)] <- "Promoter"
   factor(f, levels = FEAT_LV)
 }
-umr_use <- seg[seg$type == "UMR"]              # all UMRs (no dMeth filter — see 6c)
+umr_use <- seg[seg$type == "UMR"]   # all UMRs, no deltaMeth filter
 lfeat <- feat_of(lmr_use); ufeat <- feat_of(umr_use)
 fwrite(rbind(data.table(region = "LMR", feature = FEAT_LV, n = as.integer(table(lfeat))),
              data.table(region = "UMR", feature = FEAT_LV, n = as.integer(table(ufeat)))),
@@ -563,8 +505,7 @@ save_plot(FIGS, "figS8_lmr_genomic_location", function() {
   text(bp, as.integer(cnt), labels = as.integer(cnt), pos = 3, cex = 0.9, xpd = NA)
   mtext(sprintf("n = %s", format(length(lmr_use), big.mark = ",")), side = 3, line = 0.2, cex = 0.85)
 }, w = 5, h = 4)
-# The pie version the manuscript uses: LMR and UMR side by side, % per feature;
-# labels OUTSIDE the wedges as plain text (project rule: no boxed text).
+# Pie version used in the manuscript: LMR and UMR side by side, labels outside the wedges
 pie_feat <- function(f, title) {
   cnt <- table(f); pct <- 100 * as.numeric(cnt) / sum(cnt)
   pie(as.numeric(cnt), labels = sprintf("%s\n%.1f%% (%s)", names(cnt), pct,
@@ -577,14 +518,9 @@ save_plot(FIGS, "figS8_lmr_umr_region_pie", function() {
   pie_feat(lfeat, "LMRs"); pie_feat(ufeat, "UMRs")
 }, w = 10, h = 5)
 
-# ---- [5c] Do DMRs fall in LMRs / UMRs? width-matched overlap test ----------------
-# The LMR section asks whether the distal, CpG-poor elements carry the amputation
-# change; this answers it directly. Each DMR (05_differential) is scored for overlap with
-# any LMR and, separately, any UMR; the background is 1,000 sets of random intervals with
-# the same width distribution, anchored on random analysed CpGs of the same cov>=10
-# universe the segmentation used (the recipe of the 05 region enrichment). Fold =
-# observed / mean random; empirical P = fraction of random sets with at least the observed
-# count; a Fisher test on DMR vs the pooled random intervals gives the odds ratio.
+# Step 14 - DMR overlap with LMRs / UMRs against matched random backgrounds
+# Each DMR is scored for overlap with any LMR and any UMR; 1,000 random interval sets anchored on
+# analysed CpGs give fold = observed / mean random and an empirical P; Fisher vs pooled randoms
 cat("[5c] DMR overlap with LMRs / UMRs (width-matched background)\n")
 dmr_dt5 <- fread(file.path(PIPE, "05_differential/data/dmrs_annotated.tsv"))[chr %in% keep_chr]
 dmr_gr5 <- GRanges(dmr_dt5$chr, IRanges(dmr_dt5$start, dmr_dt5$end))
@@ -592,10 +528,8 @@ strand(dmr_gr5) <- "*"
 lmr_set <- seg[seg$type == "LMR"]; umr_set <- seg[seg$type == "UMR"]
 strand(lmr_set) <- "*"; strand(umr_set) <- "*"
 n_rand <- 1000L; dmr_w <- width(dmr_gr5); dmr_ncg <- dmr_dt5$nCG
-# Two nulls. Width-matched: random analysed CpG anchors extended to a DMR width. CpG-count
-# matched: the same anchors extended to the same NUMBER of analysed CpGs as a DMR (both LMRs
-# and UMRs are defined by CpG content, so width alone under-matches them); anchors whose
-# CpG run crosses a chromosome end are dropped from that draw.
+# Two nulls: width matched (anchors extended to a DMR width) and CpG-count matched (anchors
+# extended to the same number of analysed CpGs); anchors crossing a chromosome end are dropped
 set.seed(20260426)
 cpg_chr <- as.character(seqnames(cpg))
 draw <- function(kind) {
@@ -635,17 +569,9 @@ dmr_ovl <- rbindlist(lapply(c("width matched", "CpG count matched"), function(nu
 }))
 fwrite(dmr_ovl, file.path(DAT, "dmr_lmr_umr_overlap.tsv"), sep = "\t"); print(dmr_ovl)
 
-# ---- [6] REMOVED: binary LMR enrichment (tombstone) --------------------------
-# gainers) exists for data without a proper LMR set; our continuous deltaMeth
-# gradient makes §4 the right analysis, and the binary contrast was underpowered
-
-# ---- [6a-bis] Weber promoter classifier (PROTEIN-CODING ONLY) ----------------
-# continuation of 03_promoters's Weber analysis (Weber 2007 classified protein-coding
-# promoters). Do NOT widen to lncRNA — the project-wide 24,993-gene universe
-# applies elsewhere, not to the Weber bins. Biotype filter, never expression.
-# weber_sliding is reproduced from 03_promoters VERBATIM (self-containment: 08_motifs
-# re-classifies rather than reading 03_promoters's locked TSV, so slug and human
-# promoters go through byte-identical code; no shared helper scripts exist).
+# Step 15 - Weber promoter classification (protein-coding genes only)
+# weber_sliding reproduces the 03_promoters classification so that slug and human promoters go
+# through identical code; Weber 2007 classified protein-coding promoters only
 weber_sliding <- function(gen, dt, w = 500L, off = 5L) {
   cls <- character(nrow(dt)); mxoe <- rep(NA_real_, nrow(dt)); whoe <- rep(NA_real_, nrow(dt))
   for (ac in intersect(unique(dt$seqid), names(gen))) {
@@ -670,14 +596,12 @@ weber_sliding <- function(gen, dt, w = 500L, off = 5L) {
              weber_class = factor(cls, levels = c("HCP", "ICP", "LCP")))
 }
 
-# ---- [6b] Weber-class promoter motif enrichment (categorical monaLisa) -------
-# Categorical run (vignette "bins from a factor", NOT the binary special case):
-# strand-aware -1300/+200 promoter windows, Weber HCP/ICP/LCP as the bins,
-# background = "otherBins" -> which motifs mark CpG-island vs CpG-poor promoters.
-# overlaps HCP/LCP poorly — the per-class GC panel documents the confound.
+# Step 16 - Weber-class promoter motif enrichment (categorical monaLisa bins)
+# Strand-aware -1300/+200 promoter windows with HCP/ICP/LCP as bins, background = other bins.
+# HCP is high-GC by definition, so the GC panel below documents the confound
 cat("[6b] Weber-class promoter motif enrichment (categorical bins)\n")
 COL_WEBER <- c(HCP = "#117733", ICP = "#88CCEE", LCP = "#CC6677")   # match 03_promoters
-KEEP_BIOTYPE <- "protein_coding"          # Weber = protein-coding only (03_promoters continuation)
+KEEP_BIOTYPE <- "protein_coding"   # protein-coding only
 gid9  <- sub(";.*", "", as.character(mcols(gene_gr)$ID))
 neg9  <- as.character(strand(gene_gr)) == "-"
 tss9  <- ifelse(neg9, end(gene_gr), start(gene_gr))                 # strand-aware TSS
@@ -692,7 +616,7 @@ prom9 <- trim(prom9); prom9 <- prom9[width(prom9) >= 100]          # clamp edge 
 cat(sprintf("  promoter universe: %d genes (%s; pseudogenes dropped)\n",
             length(prom9), paste(sprintf("%s %d", names(table(prom9$biotype)),
                                          as.integer(table(prom9$biotype))), collapse = " + ")))
-# classify HERE (03_promoters is locked and covers protein_coding only)
+# Classification is done here rather than read from 03_promoters
 wcls <- weber_sliding(genome, data.table(seqid = as.character(seqnames(prom9)),
                                          ps = start(prom9), pe = end(prom9)))
 prom9$weber_class <- wcls$weber_class
@@ -728,13 +652,11 @@ nW   <- table(wbins)
 ttlW <- sprintf("Promoter TF motifs across Weber CpG classes (HCP %s / ICP %s / LCP %s)",
                 format(nW[["HCP"]], big.mark=","), format(nW[["ICP"]], big.mark=","),
                 format(nW[["LCP"]], big.mark=","))
-seWc <- top_n_sig(dedupe_by_tf(seW))                         # one matrix per TF (TFAP2A once; A and B both if enriched)
-# w=10: at 7.5 the right-hand legends were cut off and long TF labels clipped
-# ("FLI1::DRGX" -> "LI1::DRGX"); height floor keeps 10 rows unsquashed.
+seWc <- top_n_sig(dedupe_by_tf(seW))   # one matrix per TF
 save_plot(FIGS, "figS8_promoter_weber_motif_enrichment",
           function() draw_motif_hm(label_ids(seWc), ttlW),
           w = 10, h = max(5, 0.30 * nrow(seWc) + 2.5))
-# GC content per promoter by Weber class — documents the GC confound behind the run
+# GC content per promoter by Weber class
 gcf <- rowSums(letterFrequency(promseqs, c("G", "C"), as.prob = TRUE))   # G + C fraction
 save_plot(FIGS, "figS8_promoter_weber_gc", function() {
   par(mar = c(4, 4, 3, 1))
@@ -743,15 +665,9 @@ save_plot(FIGS, "figS8_promoter_weber_gc", function() {
           main = "Promoter GC by Weber class (HCP is high-GC by definition)")
 }, w = 5, h = 4)
 
-# calcBinnedMotifEnrR already corrects for GC + k-mer composition internally, so a
-# second manual correction was redundant and misleading. The Weber GC-by-
-# construction caveat is carried by the per-class GC panel + captions.
-
-# ---- [6c] LMR / UMR overlap with Weber promoter classes ----------------------
-# Per Weber class: fraction of promoters carrying an LMR / a UMR (Fisher, class vs
-# (>=30-CpG rule) and HCP is CpG-rich by construction, so a UMR-HCP association is
-# partly DEFINITIONAL — never report it as an independent discovery. The LMR
-# column is the informative one (LMRs are CpG-poor; nothing forces their class).
+# Step 17 - LMR / UMR overlap with Weber promoter classes
+# UMRs (>= 30 CpGs) and HCP promoters are both CpG-rich by construction, so a UMR-HCP association
+# is partly definitional; the LMR column is the informative one
 cat("[6c] LMR / UMR overlap with Weber promoter classes\n")
 p_lmr <- overlapsAny(prom9, lmr_use); p_umr <- overlapsAny(prom9, umr_use)
 ov_dt <- rbindlist(lapply(c("LMR", "UMR"), function(k) {
@@ -778,27 +694,21 @@ save_plot(FIGS, "figS8_weber_class_lmr_umr", function() {
   legend("topright", legend = c("LMR", "UMR"), fill = c("#009E73", "#0072B2"), bty = "n")
 }, w = 6, h = 4.2)
 
-# LMR/UMR localisation it defines itself.
-
-# ---- [6e] HOMER known-motif enrichment: UMR promoters, LMRs, DMRs ------------
-# The paper's region-set enrichment, done with HOMER (not monaLisa) exactly as the
-# two reference methylome papers did: annelid (Guynes 2024 Genome Biol — UMRs <5 kb
-# overlapping promoters -2 kb/+200, findMotifsGenome.pl, lengths 6,8,10,12) and
-# sponge (Amphimedon — "-nomotif -mknown" on the known-motif set). KNOWN motifs
-# deviation, STATE IN METHODS: we score the ortholog-filtered JASPAR set via
+# Step 18 - HOMER known-motif enrichment: UMR promoters, LMRs, DMRs
+# Region-set enrichment with findMotifsGenome.pl on the ortholog-filtered JASPAR library
+# (-mknown, -nomotif); known motifs only, no de novo search
 cat("[6e] HOMER motif enrichment (UMR promoters, LMRs, DMRs): known motifs\n")
 HOMER <- "/mnt/data/alfredvar/rlopezt/meth_paper/tools/homer/bin/findMotifsGenome.pl"
 if (!file.exists(HOMER)) cat("  SKIPPED — HOMER not installed at tools/homer\n") else {
   Sys.setenv(PATH = paste(dirname(HOMER), Sys.getenv("PATH"), sep = ":"))  # HOMER scripts call siblings by name
   ncpu <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "4"))
-  # chr1-31 + mito genome FASTA for HOMER (cached; HOMER preparses the background)
+  # Genome FASTA for HOMER (cached; HOMER preparses the background)
   genome_fa <- file.path(OBJ, "genome_chrmt.fa")
   if (!file.exists(genome_fa)) { Biostrings::writeXStringSet(genome, genome_fa); cat("  wrote genome FASTA\n") }
 
-  # "figures must be made with homer"). knownResults/known<i>.logo.svg is keyed by
-  # SVG verbatim under <g transform>, adding only text + CpG boxes.
-  # width/L instead misaligns the CpG shading. The log's "sequence logos...
-  # Skipping..." only means the absent WebLogo/`seqlogo` backend — not a failure.
+  # Step 18.1 - Figure helpers: HOMER's own logos composed into one SVG
+  # knownResults/known<i>.logo.svg is keyed by row number in knownResults.txt, so logos are matched
+  # by rank; HOMER lays positions on a 25-unit pitch, used to place the CpG shading
   HOMER_PITCH <- 25
   svg_inner <- function(f) {                      # strip HOMER's outer <svg>...</svg>
     s <- paste(readLines(f, warn = FALSE), collapse = "\n")
@@ -806,14 +716,13 @@ if (!file.exists(HOMER)) cat("  SKIPPED — HOMER not installed at tools/homer\n
          h = as.numeric(sub('.*<svg[^>]*height="([0-9.]+)".*', "\\1", s)),
          body = sub("</svg>\\s*$", "", sub("^.*?<svg[^>]*>", "", s)))
   }
-  # escape & BEFORE < , else the & of "&lt;" is itself escaped and renders as "&lt;"
+  # Escape & before < so that the & of '&lt;' is not escaped again
   xml_esc <- function(x) gsub("<", "&lt;", gsub("&", "&amp;", x))
-  # SVG, and R here has no SVG reader (rsvg/grImport2 absent, magick lacks delegates).
+  # .pdf/.png are rendered from the composite SVG with rsvg-convert
   RSVG <- "/usr/bin/rsvg-convert"
-  # motif-set size, background model and filtering go to the LOG and the caption.
+  # Plain short title; counts and filtering are reported in the log and the caption
   save_homer_svg <- function(rows, nm, title, ncol = 2, outdir_fig = FIGS) {
-    # scale each logo to fit height AND width: s = min(LOGO_H/h, LOGO_W/w) — the old
-    # width-only scaling blew short motifs up and overflowed into the row below
+    # Each logo is scaled to fit both height and width
     COLW <- 300; LOGO_H <- 46; LOGO_W <- 258
     ROWH <- LOGO_H + 34; TOP <- 62          # 34 = the two label lines + inter-row gap
     nr <- ceiling(length(rows) / ncol)
@@ -845,15 +754,13 @@ if (!file.exists(HOMER)) cat("  SKIPPED — HOMER not installed at tools/homer\n
     cat(sprintf("  saved %s (%d HOMER logos)\n", nm, length(rows)))
   }
 
-  # figure shall only show the high folds"): ubiquitous short AT-rich homeobox
-  # 5-6mers hit >95% of target AND background at fold ~1.03 and are "significant"
-  # only because n is large — ranking by p alone would sit LMX1A (1.04x) beside
-  # YY2 (2.4x).
+  # Step 18.2 - Motif selection by effect size
+  # Ubiquitous short AT-rich motifs hit > 95 percent of target and background at fold ~1 and are
+  # significant only because n is large, so motifs are ranked by fold (q < 0.05, fold >= 1.5)
   FOLD_MIN <- 1.5; UBIQ <- 95; TOPN <- 10; CORE <- 6
   pick_homer <- function(kr) {
     ok <- kr[!is.na(fold) & q < 0.05 & fold >= FOLD_MIN & pct_target_num <= UBIQ][order(-fold)]
-    # collapse families: skip motifs sharing a >=CORE bp exact substring with one
-    # kept, else the panel is 7 near-identical ETS logos + 5 E-boxes
+    # Motif families are collapsed: a motif sharing a >= 6 bp exact substring with a kept one is skipped
     keep <- integer(0)
     for (i in seq_len(nrow(ok))) {
       cons <- ok$consensus[i]
@@ -866,25 +773,22 @@ if (!file.exists(HOMER)) cat("  SKIPPED — HOMER not installed at tools/homer\n
     }
     ok[keep]
   }
-  # run_homer: BED -> findMotifsGenome.pl (known motifs only) -> knownResults.txt
-  # -> TSV + logo figure.
-  # cpg=TRUE = CpG%-matched background, used ONLY for the UMR promoters (CpG-rich
-  # BY CONSTRUCTION; a GC background cannot tell "motif enriched" from "CpG-rich").
-  # STATE IN METHODS, do not claim their exact command.
-  # models — never compare a CpG-related statistic across them (a CpG-motif OR was
+  # Step 18.3 - run_homer: BED -> findMotifsGenome.pl -> knownResults.txt -> TSV and logo figure
+  # cpg = TRUE (CpG-matched background) is used only for the UMR promoters, which are CpG-rich by
+  # construction; the LMR/DMR runs use the GC-matched default, so CpG statistics are not comparable
+  # across the two null models. main = TRUE writes to figures/main
   run_homer <- function(gr, tag, title, cpg = FALSE, main = FALSE) {
     bed <- file.path(OBJ, sprintf("homer_%s_chrmt.bed", tag))
     fwrite(data.table(chr = as.character(seqnames(gr)), start = start(gr) - 1L, end = end(gr),
                       id = sprintf("%s_%05d", tag, seq_along(gr)), score = 0L, strand = "+"),
            bed, sep = "\t", col.names = FALSE)
     outdir <- file.path(OBJ, sprintf("homer_%s_chrmt", tag)); log <- file.path(OBJ, sprintf("homer_%s_chrmt.log", tag))
-    args <- c(bed, genome_fa, outdir, "-mknown", homer_motifs, "-p", ncpu,   # ortholog-filtered JASPAR motifs, NOT -mset vertebrates
-              "-size", "given", "-len", "6,8,10,12", "-nomotif",
+    args <- c(bed, genome_fa, outdir, "-mknown", homer_motifs, "-p", ncpu,   # ortholog-filtered JASPAR motifs
+              "-size", "given", "-len", "6,8,10,12", "-nomotif",   # known motifs only
               "-preparsedDir", file.path(OBJ, "homer_preparsed"))
     if (cpg) args <- c(args, "-cpg")
     kr_file <- file.path(outdir, "knownResults.txt")
-    # The HOMER scan is cached (the expensive step; ~31 min UMR promoters): delete
-    # changes — a stale scan silently scores the OLD library (see §4 cache note).
+    # The HOMER scan is cached; delete the homer_<tag> directory to force a fresh scan
     if (fresh_cache(kr_file, c(IN_BRIDGE, IN_BSSEQ, IN_DMRS))) {
       cat(sprintf("  [%s] reuse cached HOMER scan (%s)\n", tag, basename(outdir)))
     } else {
@@ -895,7 +799,7 @@ if (!file.exists(HOMER)) cat("  SKIPPED — HOMER not installed at tools/homer\n
     }
     kr <- fread(kr_file)
     setnames(kr, c("motif","consensus","p","logp","q","n_target","pct_target","n_bg","pct_bg")[seq_len(ncol(kr))])
-    # the natural-log column for anything reported.
+    # HOMER's P-value column is truncated to a power of ten; P is recomputed from the log column
     kr[, `:=`(rank = .I, tf = sub("/.*", "", motif),
               pct_target_num = as.numeric(sub("%", "", pct_target)),
               pct_bg_num = as.numeric(sub("%", "", pct_bg)))]
@@ -905,23 +809,21 @@ if (!file.exists(HOMER)) cat("  SKIPPED — HOMER not installed at tools/homer\n
     fwrite(kr, file.path(DAT, sprintf("%s_homer_known_motifs.tsv", tag)), sep = "\t")
     cat(sprintf("  [%s] HOMER known motifs q<0.05: %d; top: %s\n", tag,
                 sum(kr$q < 0.05, na.rm = TRUE), paste(head(kr[order(logp)]$tf, 6), collapse = ", ")))
-    # all-zero counts on both sides = broken detection thresholds (see the
-    # natural-log trap in §1) — the log line says which one this is.
+    # A real null has hits in both target and background; zero hits on both sides means broken thresholds
     if (sum(kr$q < 0.05, na.rm = TRUE) == 0)
       cat(sprintf("  [%s] NULL: min q = %.3f; %d/%d motifs have target hits, %d/%d background hits%s\n",
                   tag, min(kr$q, na.rm = TRUE), sum(kr$n_target > 0), nrow(kr),
                   sum(kr$n_bg > 0), nrow(kr),
                   if (sum(kr$n_target > 0) == 0) "  <-- ZERO hits: thresholds are broken, NOT a real null" else "  (real null)"))
-    # Figure = HOMER's own sequence logos in the reference papers' style (Guynes
-    # Fig 5g,h; Amphimedon Fig 2b): one logo per enriched motif, TF + P/q + target
-    # vs background %, every CpG in the consensus shaded grey — the shading is the
+    # Figure: one HOMER logo per selected motif with TF, P/q and target vs background percent;
+    # every CpG in the consensus is shaded grey
     sel <- pick_homer(kr)
     n_sig  <- sum(kr$q < 0.05, na.rm = TRUE)
     n_ubiq <- sum(kr$q < 0.05 & kr$pct_target_num > UBIQ, na.rm = TRUE)
     n_weak <- sum(kr$q < 0.05 & kr$pct_target_num <= UBIQ &
                   (is.na(kr$fold) | kr$fold < FOLD_MIN), na.rm = TRUE)
     if (!nrow(sel)) {
-      # the null is reported in the log and the TSV instead.
+      # No figure for non-significant motifs; the null is reported in the log and the TSV
       cat(sprintf("  [%s] no motif passes q<0.05 & fold>=%.1f -- NO figure written (null reported in %s_homer_known_motifs.tsv)\n",
                   tag, FOLD_MIN, tag)); return(invisible())
     }
@@ -938,15 +840,15 @@ if (!file.exists(HOMER)) cat("  SKIPPED — HOMER not installed at tools/homer\n
     rows <- Filter(Negate(is.null), rows)
     if (miss) cat(sprintf("  [%s] %d selected motifs had no HOMER logo file\n", tag, miss))
     if (!length(rows)) { cat(sprintf("  [%s] no HOMER logos available -- no figure\n", tag)); return(invisible()) }
-    # what was filtered goes to the LOG (and the manuscript caption), not onto the figure
     cat(sprintf("  [%s] %d motifs q<0.05; showing top %d by fold (dropped %d ubiquitous >%d%% of regions, %d with fold<%.1f; families collapsed)\n",
                 tag, n_sig, length(rows), n_ubiq, UBIQ, n_weak, FOLD_MIN))
     save_homer_svg(rows,
       sprintf(if (main) "fig8_%s_homer_motifs" else "figS8_%s_homer_motifs", tag), title,
       outdir_fig = if (main) FIGM else FIGS)
   }
-  # (1) UMR promoters: UMRs <5 kb with >=80% inside a -2 kb/+200 promoter (Guynes).
-  # pintersect/set ops are strand-aware — the silent-0 trap (see 05_differential §8).
+  # Step 18.4 - The three region sets
+  # Region set 1: UMRs < 5 kb with >= 80 percent of their length inside a -2 kb/+200 promoter.
+  # Promoters are unstranded first because UMRs are unstranded and set operations are strand-aware
   ph <- trim(suppressWarnings(promoters(gene_gr, upstream = 2000, downstream = 200)))
   strand(ph) <- "*"; prom_hp <- reduce(ph)
   umr5 <- umr_use[width(umr_use) < 5000L]
@@ -957,21 +859,17 @@ if (!file.exists(HOMER)) cat("  SKIPPED — HOMER not installed at tools/homer\n
               format(length(umr5), big.mark=","), format(length(umr_prom), big.mark=",")))
   run_homer(umr_prom, "umr_promoter", "TF motifs at unmethylated promoters",
             cpg = TRUE, main = TRUE)
-  # (2) LMRs, all of them — a different question from the §4 gradient: HOMER asks
-  #     "are LMRs as a set enriched?", monaLisa "which motifs track deltaMeth?".
+  # Region set 2: all LMRs as one set (distinct from the gradient of Step 8)
   run_homer(lmr_use, "lmr", "TF motifs at low-methylated regions", cpg = FALSE)
-  # (3) DMRs (05_differential) — the ONLY DMR motif test in the batch (monaLisa DMR run
-  #     removed, §7); not CpG islands, so default GC% background.
+  # Region set 3: DMRs from 05_differential (GC-matched background)
   dmr_hg <- with(fread(file.path(PIPE, "05_differential/data/dmrs_annotated.tsv"))[chr %in% keep_chr],
                  GRanges(chr, IRanges(start, end)))
   run_homer(dmr_hg, "dmr", "TF motifs at differentially methylated regions", cpg = FALSE)
 }
 
-# ---- [6f] HUMAN Weber-class promoter run + cross-species comparison ----------
-# Repeat §6b on GRCh38 protein-coding promoters — SAME -1300/+200 window, SAME
-# human = JASPAR2024 CORE annotated to H. sapiens (tax_id 9606), slug = the
-# ortholog set (scoring human promoters with the slug-filtered PWMs would be
-# wrong). The cross-species scatter compares the INTERSECTION, matched by JASPAR
+# Step 19 - Human GRCh38 Weber-class promoter run and cross-species comparison
+# Same -1300/+200 window and same classification code on human protein-coding promoters, scored
+# with the JASPAR2024 human motif set; the scatter compares motifs scored in both species
 cat("[6f] HUMAN GRCh38 Weber-class promoter motif enrichment (JASPAR human motifs)\n")
 pwms_h <- getMatrixSet(JASPAR_SQLITE, opts = list(matrixtype = "PWM", species = "9606"))
 cat(sprintf("  %d JASPAR2024 CORE human (tax_id 9606) PWMs for the human run\n", length(pwms_h)))
@@ -981,14 +879,12 @@ hs_gff <- file.path(B03DS, "GRCh38_latest_genomic.gff.gz")
 human_ok <- file.exists(hs_fna) && file.exists(hs_gff)
 if (!human_ok) cat("  SKIPPED — human GRCh38 reference not staged in 03_promoters/dataset\n")
 if (human_ok) {
-  # weber_sliding() from §6a-bis reused: both species classified by byte-identical
-  # code — the whole point of the comparison.
   hs_primary <- c(sprintf("NC_0000%02d", 1:22), "NC_000023", "NC_000024")
   hg <- fread(cmd = sprintf("zcat '%s' | grep -v '^#'", hs_gff), sep = "\t", header = FALSE, quote = "",
               col.names = c("seqid","src","type","start","end","score","strand","phase","attr"))
   hg <- hg[type == "gene" & sub("\\..*", "", seqid) %in% hs_primary]
   hg[, biotype := sub(".*gene_biotype=([^;]+).*", "\\1", attr)]
-  hg <- hg[biotype %in% KEEP_BIOTYPE]   # SAME universe as the slug: protein_coding only (Weber's set)
+  hg <- hg[biotype %in% KEEP_BIOTYPE]   # same universe as the slug: protein_coding only
   hg[, symbol := sub(".*;gene=([^;]+).*", "\\1", attr)]
   hg[, tss := ifelse(strand == "-", end, start)]; hneg <- hg$strand == "-"
   hg[, `:=`(ps = ifelse(hneg, tss - 200L, tss - 1300L), pe = ifelse(hneg, tss + 1300L, tss + 200L))]
@@ -1001,7 +897,7 @@ if (human_ok) {
   cat(sprintf("  %d human protein-coding promoters -> HCP %.0f%% / ICP %.0f%% / LCP %.0f%%\n",
               nrow(hg), 100*mean(hg$weber_class=="HCP"), 100*mean(hg$weber_class=="ICP"),
               100*mean(hg$weber_class=="LCP")))
-  # sequences, clamped to the chromosome, same >=100 bp rule as prep_gr/get_seqs
+  # Sequences clamped to the chromosome; same >= 100 bp rule as prep_gr/get_seqs
   hg[, `:=`(ps = pmax(1L, ps), pe = pmin(as.integer(width(hs_genome))[match(seqid, names(hs_genome))], pe))]
   hg <- hg[pe - ps + 1L >= 100]
   hseqs <- DNAStringSet(unlist(lapply(split(seq_len(nrow(hg)), hg$seqid), function(i) {
@@ -1031,10 +927,9 @@ if (human_ok) {
               sprintf("HUMAN promoter TF motifs across Weber classes (HCP %s / ICP %s / LCP %s)",
                       format(nH[["HCP"]], big.mark=","), format(nH[["ICP"]], big.mark=","),
                       format(nH[["LCP"]], big.mark=","))),
-            w = 10, h = max(5, 0.30 * nrow(seH) + 2.5))   # same sizing fix as the D. laeve panel
+            w = 10, h = max(5, 0.30 * nrow(seH) + 2.5))
 
-  # Cross-species scatter: per-motif HCP enrichment, human vs D. laeve. Off-
-  # diagonal motifs = CpG-island-promoter preference differs between the species.
+  # Cross-species scatter: per-motif HCP enrichment, human vs D. laeve
   cmp9 <- merge(
     data.table(motif = rownames(se_w), tf = rowData(se_w)$motif.name,
                dlaeve_HCP = assay(se_w, "log2enr")[, "HCP"],
@@ -1081,17 +976,9 @@ if (human_ok) {
 
 }
 
-# ---- [6g] REMOVED: GC-matched genome-background check (tombstone) ------------
-# and paper") — the check and its figure figS8_promoter_hcp_genome_background are
-# out. The Weber GC-by-construction caveat is carried by the per-class GC panel
-# (figS8_promoter_weber_gc) and the caption instead.
+# Step 20 - Log notes for analyses handled in other modules; session info
 cat("[6g] REMOVED — GC-matched genome-background check dropped (author, 2026-08-26)\n")
 
-# co-expression question, and 07_wgcna reading 08_motifs would be an illegal upstream
-
-# ---- [7] REMOVED: DMR monaLisa run (tombstone) -------------------------------
-# run duplicates §6e's HOMER DMR test with the wrong tool, and it never produced
-# anything (0 significant motifs at cov5 and again at cov10).
 cat("[7] DMR motif enrichment: REMOVED — DMRs are tested with HOMER in §6e (see comment)\n")
 
 writeLines(capture.output(sessionInfo()), file.path(BATCH, "sessionInfo_08_motifs.txt"))
