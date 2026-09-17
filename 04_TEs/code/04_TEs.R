@@ -192,19 +192,38 @@ agg <- age[!is.na(age_bin), .(beta = mean(beta_pooled, na.rm = TRUE),
                               se = sd(beta_pooled, na.rm = TRUE)/sqrt(.N), n = .N),
            by = .(class, loc, age_bin)]
 fwrite(agg, file.path(DAT, "te_age_by_class_location.tsv"), sep = "\t")
-agg[, class := factor(class, levels = ridge_classes)]
-pc <- ggplot(agg, aes(age_bin, beta*100, fill = loc)) +
-  geom_col(position = position_dodge(0.8), width = 0.7, colour = "black", linewidth = 0.2) +
-  geom_errorbar(aes(ymin = (beta-se)*100, ymax = (beta+se)*100),
-                position = position_dodge(0.8), width = 0.2, linewidth = 0.25) +
-  facet_wrap(~ class, ncol = 5, scales = "free_x") +
-  scale_fill_manual(values = COL_LOC, name = "Genomic location") +
-  labs(x = "TE age (Kimura-divergence quintile)", y = "Per-copy mean CpG methylation β (%)",
-       title = "TE methylation and Kimura Divergence",
-       caption = NULL) +
-  theme_pub() + theme(axis.text.x = element_text(size = 7, angle = 45, hjust = 1),
-                      plot.caption = element_text(hjust = 1, size = 6.5, colour = "grey30"))
-save_supp(pc, "figS4_te_age_by_class_location_wgbs_tail", 9.0, 3.0)
+dlab <- sprintf("D%d", 1:10)
+decile_table <- function(dt, beta_col) {
+  dt <- copy(dt)
+  setnames(dt, beta_col, "b")
+  dt[, age_dec := cut(kimura, breaks = c(-Inf, quantile(kimura, probs = seq(0.1, 0.9, 0.1)), Inf),
+                      labels = dlab, include.lowest = TRUE), by = .(class, loc)]
+  dt[!is.na(age_dec), .(beta = mean(b, na.rm = TRUE), se = sd(b, na.rm = TRUE) / sqrt(.N),
+                        frac50 = mean(b > 0.5, na.rm = TRUE), n = .N,
+                        kimura_mean = mean(kimura), kimura_lo = min(kimura), kimura_hi = max(kimura)),
+     by = .(class, loc, age_dec)][order(class, loc, age_dec)]
+}
+decile_panel <- function(dec) {
+  dec <- copy(dec); dec[, class := factor(as.character(class), levels = ridge_classes)]
+  n_lab <- dec[, .(n_tot = sum(n)), by = .(class, loc)]                     # exact copy totals per class x location
+  n_lab[, `:=`(x = Inf, y = Inf, lab = format(n_tot, big.mark = ",", trim = TRUE),
+               vj = ifelse(loc == "Intergenic", 2.8, 1.4))]                  # stacked in the empty top-right corner
+  ggplot(dec, aes(kimura_mean, beta * 100, colour = loc, group = loc)) +
+    geom_ribbon(aes(ymin = (beta - se) * 100, ymax = (beta + se) * 100, fill = loc), alpha = 0.2, colour = NA) +
+    geom_line(linewidth = 0.55) + geom_point(size = 1.1) +
+    geom_text(data = n_lab, aes(x = x, y = y, label = lab, colour = loc, vjust = vj), inherit.aes = FALSE,
+              hjust = 1.05, size = 2.2, show.legend = FALSE) +
+    facet_wrap(~ class, ncol = 5, scales = "free_x") +
+    scale_x_continuous(n.breaks = 5) +
+    scale_colour_manual(values = COL_LOC, name = "Genomic location") +
+    scale_fill_manual(values = COL_LOC, guide = "none") +
+    labs(x = "TE age: mean Kimura divergence of each age decile (%)", y = "Mean CpG methylation \u03b2 (%)",
+         title = "TE methylation and Kimura divergence") +
+    theme_pub() + theme(axis.text.x = element_text(size = 6), plot.margin = margin(4, 4, 4, 8))
+}
+dec_w <- decile_table(age, "beta_pooled")
+fwrite(dec_w, file.path(DAT, "te_age_decile_by_class_location_wgbs_tail.tsv"), sep = "\t")
+save_supp(decile_panel(dec_w), "figS4_te_age_by_class_location_wgbs_tail", 7.0, 2.5)
 
 # Step 5 - PacBio HiFi bodywall arm: main fig4a-fig4c and platform comparisons
 # HiFi = bodywall of two intact slugs, WGBS = tail: every cross-platform comparison is also cross-tissue.
@@ -322,17 +341,25 @@ agg_h <- age_h[!is.na(age_bin), .(beta = mean(beta_bw, na.rm = TRUE),
                                   se = sd(beta_bw, na.rm = TRUE) / sqrt(.N), n = .N),
                by = .(class, loc, age_bin)]
 fwrite(agg_h, file.path(DAT, "te_age_by_class_location_hifi.tsv"), sep = "\t")
-agg_h[, class := factor(as.character(class), levels = ridge_classes)]
-phc <- ggplot(agg_h, aes(age_bin, beta * 100, fill = loc)) +
-  geom_col(position = position_dodge(0.8), width = 0.7, colour = "black", linewidth = 0.2) +
-  geom_errorbar(aes(ymin = (beta - se) * 100, ymax = (beta + se) * 100),
-                position = position_dodge(0.8), width = 0.2, linewidth = 0.25) +
-  facet_wrap(~ class, ncol = 5, scales = "free_x") +
-  scale_fill_manual(values = COL_LOC, name = "Genomic location") +
-  labs(x = "TE age (Kimura-divergence quintile)", y = "Per-copy mean CpG methylation β (%)",
-       title = "TE methylation and Kimura divergence") +
-  theme_pub() + theme(axis.text.x = element_text(size = 7, angle = 45, hjust = 1))
-save_fig(phc, "fig4c_te_age_by_class_location_bodywall", 7.0, 2.4)
+dec_h <- decile_table(age_h, "beta_bw")
+fwrite(dec_h, file.path(DAT, "te_age_decile_by_class_location_hifi.tsv"), sep = "\t")
+age_h[, age_dec := cut(kimura, breaks = c(-Inf, quantile(kimura, probs = seq(0.1, 0.9, 0.1)), Inf),
+                       labels = dlab, include.lowest = TRUE), by = .(class, loc)]
+# D10-vs-D1 contrast per class x location on per-copy values (rank biserial from Mann-Whitney U;
+# numerator and denominator as doubles: n1*n2 overflows R integers above ~46k x 46k copies)
+rb_dec <- age_h[!is.na(age_dec), {
+  b1 <- beta_bw[age_dec == "D1"]; b10 <- beta_bw[age_dec == "D10"]
+  w <- suppressWarnings(wilcox.test(b10, b1, exact = FALSE))
+  .(n = .N, n_per_decile = as.integer(round(.N / 10)),
+    spearman_rho = cor(kimura, beta_bw, method = "spearman", use = "complete.obs"),
+    d10_vs_d1_rank_biserial = 2 * as.numeric(w$statistic) / (as.numeric(length(b10)) * as.numeric(length(b1))) - 1,
+    d10_vs_d1_P = w$p.value,
+    frac50_d1 = mean(b1 > 0.5), frac50_d10 = mean(b10 > 0.5),
+    monotone = { m <- tapply(beta_bw, age_dec, mean); all(diff(m) <= 0) || all(diff(m) >= 0) })
+}, by = .(class, loc)][order(loc, class)]
+fwrite(rb_dec, file.path(DAT, "te_age_decile_stats_hifi.tsv"), sep = "\t")
+cat("  HiFi age deciles, D10 vs D1 rank biserial by class x location:\n"); print(rb_dec)
+save_fig(decile_panel(dec_h), "fig4c_te_age_by_class_location_bodywall", 7.0, 2.5)
 
 # Step 6 - Statistics quoted in the text (both platforms) and condition contrast
 cat("[5] TE statistics for the text\n")

@@ -566,7 +566,7 @@ p_bas <- ggplot(bas, aes(weber_class, log2(baseMean + 1), fill = weber_class)) +
   scale_fill_manual(values = COL_WEBER, guide = "none") +
   labs(x = "Weber promoter class", y = expression(log[2](baseMean + 1)),
        title = "Basal expression by promoter class",
-       subtitle = sprintf("genes with a DESeq2 estimate; median baseMean HCP %.0f / ICP %.0f / LCP %.0f (Kruskal-Wallis p = %.2g)",
+       subtitle = sprintf("genes with a DESeq2 estimate; median baseMean HCP %.0f / ICP %.0f / LCP %.0f\nKruskal-Wallis p = %.2g",
                           med_bas$med[1], med_bas$med[2], med_bas$med[3], kw_bas$p.value)) +
   theme_pub()
 save_supp(p_bas, "figS3_weber_class_basal_expression", 5.5, 4.0)
@@ -605,12 +605,12 @@ p_ms <- ggplot(ms, aes(meth_state, log2(baseMean + 1), fill = meth_state)) +
        title = sprintf("Methylated promoters are lower expressed at %s", {
                  lo <- mw[!is.na(p) & p < 0.05 & rank_biserial > 0, weber_class]
                  if (length(lo)) paste(lo, collapse = " and ") else "no class" }),
-       subtitle = paste0("beta > ", METH_CUT, " = methylated; ",
+       subtitle = paste0("beta > ", METH_CUT, " = methylated (n methylated/unmethylated)\n",
                          paste(mw[, sprintf("%s: n = %d/%d, P = %.2g, r = %+.2f", weber_class, n_meth, n_unmeth, p, rank_biserial)],
-                               collapse = "; "))) +
+                               collapse = "\n"))) +
   theme_pub() + theme(strip.background = element_blank(),
                       axis.text.x = element_text(angle = 20, hjust = 1, size = 7))
-save_supp(p_ms, "figS3_weber_class_meth_state_expression", 7.0, 3.6)
+save_supp(p_ms, "figS3_weber_class_meth_state_expression", 7.0, 4.2)
 
 # Step 10 - AP-2 protein domain architecture (figS3_ap2_domain) via hmmscan
 # LOC_00012416 is the single D. laeve AP-2 gene; domains from hmmscan (HMMER 3.4, Pfam-A gathering thresholds).

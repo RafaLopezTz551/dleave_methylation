@@ -18,8 +18,8 @@ The script is divided by `# Step N - ...` banners in this order.
 1. Setup: seed, packages, paths, palettes, theme and figure savers.
 2. Inputs: TE age table with the chromosome filter, merged repeat fraction, collapse of class/family labels to the five scored classes, WGBS per-condition M and Cov sums, gene set.
 3. Per-TE-copy WGBS methylation, pooled per condition.
-4. WGBS tail supplementary panels and the non-conversion floor: per-copy methylation ridges by class and condition, by class and location, and by class, location and Kimura quintile (`figS4_te_methylation_by_class_wgbs_tail`, `figS4_te_methylation_by_class_location_wgbs_tail`, `figS4_te_age_by_class_location_wgbs_tail`).
-5. PacBio HiFi bodywall arm: per-copy HiFi methylation on the module 02 bodywall CpG set, platform coverage by Kimura bin and per-copy agreement, ridges by class, by class and location, and Kimura quintiles by class and location (`fig4a`, `fig4b`, `fig4c`).
+4. WGBS tail supplementary panels and the non-conversion floor: per-copy methylation ridges by class and condition, by class and location, and by class, location and Kimura-divergence decile, drawn as mean ± s.e. lines against the decile's mean Kimura divergence (`figS4_te_methylation_by_class_wgbs_tail`, `figS4_te_methylation_by_class_location_wgbs_tail`, `figS4_te_age_by_class_location_wgbs_tail`).
+5. PacBio HiFi bodywall arm: per-copy HiFi methylation on the module 02 bodywall CpG set, platform coverage by Kimura bin and per-copy agreement, ridges by class, by class and location, and Kimura-divergence deciles by class and location with a D10-versus-D1 Mann–Whitney contrast per class × location (`fig4a`, `fig4b`, `fig4c`).
 6. Statistics tables for both platforms, copy counts, cross-platform floor concordance, and the WGBS control versus amputated contrast per copy.
 7. Record the package versions (`sessionInfo_04_TEs.txt`).
 
@@ -32,7 +32,9 @@ The script is divided by `# Step N - ...` banners in this order.
 `te_methylation_per_copy_hifi.tsv`, `te_platform_coverage_by_kimura.tsv`,
 `te_platform_coverage_comparison.tsv`, `te_platform_percopy_agreement.tsv`,
 `te_kimura_quintile_ranges.tsv`, `te_kimura_methylation_correlation_hifi.tsv`,
-`te_age_by_class_location_hifi.tsv`, `te_statistics_bodywall.tsv`, `te_statistics_wgbs_tail.tsv`,
+`te_age_by_class_location_hifi.tsv`, `te_age_decile_by_class_location_wgbs_tail.tsv`,
+`te_age_decile_by_class_location_hifi.tsv`, `te_age_decile_stats_hifi.tsv`,
+`te_statistics_bodywall.tsv`, `te_statistics_wgbs_tail.tsv`,
 `te_copy_counts.tsv`, `te_platform_floor_concordance.tsv`, `te_condition_contrast_wgbs_tail.tsv`
 
 `objects/`

@@ -649,9 +649,11 @@ if (nrow(go_all)) {
   top[, ont_lab := factor(ontology, levels = c("BP", "MF", "CC", "KEGG"))]
   setorder(top, ont_lab, module, padj)
   top[, lab_txt := sprintf("%s (%s)", description, ontology)]
-  top[, label := factor(make.unique(lab_txt), levels = rev(make.unique(lab_txt)))]
+  top[, label_key := paste(module, lab_txt, sep = "||")]
+  top[, label := factor(label_key, levels = rev(unique(label_key)))]
   p_go <- ggplot(top, aes(fold, label, colour = padj, size = k)) +
     geom_point() +
+    scale_y_discrete(labels = function(x) sub("^.*\\|\\|", "", x)) +
     facet_grid(module ~ ont_lab, scales = "free_y", space = "free_y") +
     scale_colour_gradient(low = "#7B241C", high = "#F5CBA7", name = "BH FDR",
                           guide = guide_colourbar(reverse = TRUE)) +

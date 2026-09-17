@@ -200,15 +200,15 @@ cpg <- data.table(chr = chr_vec, pos = start(gr), Mt = M_ctrl + M_amp, Ct = C_ct
 cpg[, win := (pos %/% 1e6) * 1e6]
 agg <- cpg[, .(beta = sum(Mt)/pmax(sum(Ct),1)), by = .(chr, win)]
 agg[, chr := factor(chr, levels = keep_chr)]; agg[, end := win + 1e6 - 1]
-clen <- agg[, .(maxpos = max(end)), by = chr][order(chr)]
+agg_plot <- agg[chr != "HiC_scaffold_1563"]; agg_plot[, chr := droplevels(chr)]
+clen <- agg_plot[, .(maxpos = max(end)), by = chr][order(chr)]
 clen[, offset := cumsum(c(0, head(maxpos, -1)))]
-agg <- merge(agg, clen[, .(chr, offset)], by = "chr")
-agg[, x := (win + end)/2 + offset]; agg[, band := as.integer(chr) %% 2]
-chr_mid <- agg[, .(mid = mean(x)), by = chr][order(chr)]
-# Mito scaffold labelled 'Mt'; a few odd right-end labels blanked to avoid overlap
-chr_lab <- ifelse(chr_mid$chr == "HiC_scaffold_1563", "Mt", sub("chr", "", chr_mid$chr))
+agg_plot <- merge(agg_plot, clen[, .(chr, offset)], by = "chr")
+agg_plot[, x := (win + end)/2 + offset]; agg_plot[, band := as.integer(chr) %% 2]
+chr_mid <- agg_plot[, .(mid = mean(x)), by = chr][order(chr)]
+chr_lab <- sub("chr", "", as.character(chr_mid$chr))
 chr_lab[chr_lab %in% c("27", "29", "31")] <- ""   # thin the crowded right-end tick labels
-pb <- ggplot(agg, aes(x, beta*100, colour = factor(band))) +
+pb <- ggplot(agg_plot, aes(x, beta*100, colour = factor(band))) +
   geom_point(size = 0.35, alpha = 0.6) +
   geom_hline(yintercept = gmean_global*100, colour = "#C0392B", linetype = "dashed", linewidth = 0.6) +
   scale_colour_manual(values = c("0" = "#2C3E50", "1" = "#7F8C8D"), guide = "none") +
