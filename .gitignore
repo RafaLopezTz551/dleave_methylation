@@ -1,1 +1,20 @@
+# NFS lock files on the cluster
 .nfs*
+
+# Module outputs (produced by the scripts, not versioned)
+0[0-9]_*/data/
+0[0-9]_*/objects/
+0[0-9]_*/figures/
+0[0-9]_*/sessionInfo_*.txt
+logs/
+*.log
+
+# R session files
+.Rhistory
+.RData
+.Rproj.user/
+*.rds
+
+# OS files
+.DS_Store
+Thumbs.db

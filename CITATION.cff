@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the manuscript below."
+title: "DNA methylation landscape during tail regeneration in the garden slug Deroceras laeve: analysis code"
+type: software
+version: "1.1.0"
+date-released: "2026-10-22"
+repository-code: "https://github.com/RafaLopezTz551/dleave_methylation"
+authors:
+  - family-names: "Lopez-Tellez"
+    given-names: "Rafael"
+    affiliation: "Instituto de Neurobiología, Universidad Nacional Autónoma de México"
+  - family-names: "Gutiérrez-Sarmiento"
+    given-names: "Wilbert"
+    affiliation: "Instituto de Neurobiología, Universidad Nacional Autónoma de México"
+  - family-names: "Trejo-Arellano"
+    given-names: "Minerva S."
+    affiliation: "Institute of Science and Technology Austria"
+  - family-names: "Brito-Domínguez"
+    given-names: "Diego Alfredo"
+    affiliation: "Instituto de Neurobiología, Universidad Nacional Autónoma de México"
+  - family-names: "Varela-Echavarría"
+    given-names: "Alfredo"
+    affiliation: "Instituto de Neurobiología, Universidad Nacional Autónoma de México"
+  - family-names: "Miranda-Rodríguez"
+    given-names: "Jerónimo R."
+    affiliation: "Instituto de Neurobiología, Universidad Nacional Autónoma de México"
+keywords:
+  - DNA methylation
+  - regeneration
+  - mollusk
+  - WGBS
+  - PacBio HiFi
