@@ -9,9 +9,6 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/%x_%j.log
 
-# Launcher for 06_decoupling/code/06_decoupling.R (methylation vs expression).
-# Submit from main/methylation_pipeline/: sbatch 06_decoupling/code/06_decoupling.slurm
-
 export R_LIBS="/mnt/data/alfredvar/rlopezt/rlib:/mnt/data/alfredvar/jmiranda/80-scripts/88-R-packages"
 set -euo pipefail
 export SCRATCH_JOB="/scratch/groups/alfredvar/$USER/job_$SLURM_JOB_ID"

@@ -1,7 +1,4 @@
 #!/bin/bash
-# SLURM launcher for 04_TEs: sets R_LIBS and a scratch TMPDIR (local /tmp fallback), then runs
-# code/04_TEs.R with Rscript from the module directory. Submit from main/methylation_pipeline/:
-#   sbatch 04_TEs/code/04_TEs.slurm
 #SBATCH --job-name=04_TEs
 #SBATCH --partition=defq
 #SBATCH --exclude=node09,node06
@@ -13,7 +10,10 @@
 #SBATCH --output=logs/%x_%j.log
 
 export R_LIBS="/mnt/data/alfredvar/rlopezt/rlib:/mnt/data/alfredvar/jmiranda/80-scripts/88-R-packages"
-set -uo pipefail   # no -e: a missing /scratch must fall back to /tmp, not kill the job
+set -uo pipefail   # NOT -e: /scratch is node-local (absent/unwritable on e.g. node09)
+                   # — a scratch miss must fall back to local /tmp, not kill the job.
+# 04_TEs uses scratch only for TMPDIR (it reads cached objects + the TE table),
+# so a local fallback is safe and keeps the job node-agnostic.
 SCRATCH_JOB="/scratch/groups/alfredvar/$USER/job_$SLURM_JOB_ID"
 if mkdir -p "$SCRATCH_JOB/tmp" 2>/dev/null; then
   export TMPDIR="$SCRATCH_JOB/tmp"

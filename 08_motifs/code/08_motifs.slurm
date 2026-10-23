@@ -1,6 +1,4 @@
 #!/bin/bash
-# Launcher for 08_motifs/code/08_motifs.R: sets the R library path and a per-job scratch TMPDIR,
-# runs the module script from the module directory, then removes the scratch space.
 #SBATCH --job-name=08_motifs
 #SBATCH --partition=defq
 #SBATCH --exclude=node09,node06

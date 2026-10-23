@@ -1,7 +1,4 @@
 #!/bin/bash
-# SLURM launcher for 03_promoters: sets R_LIBS and a scratch TMPDIR, then runs code/03_promoters.R
-# with Rscript from the module directory. Submit from main/methylation_pipeline/:
-#   sbatch 03_promoters/code/03_promoters.slurm
 #SBATCH --job-name=03_promoters
 #SBATCH --partition=defq
 #SBATCH --exclude=node09,node06
@@ -14,9 +11,11 @@
 
 export R_LIBS="/mnt/data/alfredvar/rlopezt/rlib:/mnt/data/alfredvar/jmiranda/80-scripts/88-R-packages"
 set -euo pipefail
+# 03_promoters does no heavy I/O (it reads RDS + classifies), so scratch is optional here.
+# Fall back to node-local tmp.
 export SCRATCH_JOB="/scratch/groups/alfredvar/$USER/job_$SLURM_JOB_ID"
 if mkdir -p "$SCRATCH_JOB/tmp" 2>/dev/null; then export TMPDIR="$SCRATCH_JOB/tmp"
 else SCRATCH_JOB=""; export TMPDIR="${TMPDIR:-/tmp}"; echo "no scratch on $(hostname); TMPDIR=$TMPDIR"; fi
 cd /mnt/data/alfredvar/rlopezt/meth_paper/main/methylation_pipeline/03_promoters
 /opt/apps/r/4.4.1-studio/bin/Rscript code/03_promoters.R
-cd /; if [ -n "$SCRATCH_JOB" ]; then rm -rf "$SCRATCH_JOB"; fi
+cd /; if [ -n "$SCRATCH_JOB" ]; then rm -rf "$SCRATCH_JOB"; fi   # `&& rm` would exit 1 (false SLURM FAILED) when scratch was skipped

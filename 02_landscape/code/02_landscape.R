@@ -1,24 +1,71 @@
 #!/usr/bin/env Rscript
-# 02_landscape.R
-# Global CpG methylation landscape of the D. laeve tail: per sample, per chromosome and per genomic
-# region, its relation to gene expression (gene bodies, TSS, discrete gene segments), and the
-# agreement between PacBio HiFi and WGBS methylation calls.
-# Inputs: four Bismark CpG reports (C1, C2 control; A1, A2 amputated), EviAnn GFF, HTSeq counts (tail
-#   and bodywall), HiFi 5mC beds (00_data_pacbio_hifi), 01_genome_toolkit objects/gff_chrmt.rds and
-#   data/gene_de_tail.tsv.
-# Outputs: data/    per-sample, window, region, decile, metagene and agreement tables (.tsv)
-#          objects/ bsseq_cov5_chrmt.rds, hifi_bodywall_cpg_persample_chrmt.rds
-#          figures/ main fig2a, b, d, e, f, g, j; supplementary figS_* and fig2i (.pdf, .png, .svg)
-# Run: sbatch 02_landscape/code/02_landscape.slurm from main/methylation_pipeline/
+# ==============================================================================
+# 02_landscape.R — Global methylation landscape
+# ------------------------------------------------------------------------------
+# QUESTION  Where is the genome methylated — per sample, per chromosome, per
+#   genomic region — and how does methylation scale with gene expression
+#   (gene bodies, TSS, discrete gene segments)? Plus HiFi-vs-WGBS agreement.
+#
+# READS (lower batches + approved read-only sources; downstream-only deps, rule 4)
+#   MCALL: 4 Bismark CpG reports (C1,C2 control; A1,A2 amputated) -> bsseq built here
+#   GFF: EviAnn gene models (prefers 01_genome_toolkit/objects/gff_chrmt.rds, else imports)
+#   HTSEQ: tail (C1S1..C4S4, T2S6..T4S8) + bodywall (dcrep1,2,3,6) HTSeq counts
+#   01_genome_toolkit/data/gene_de_tail.tsv: the paper DE definition (decile-10 dip, [7b])
+#   00_data_pacbio_hifi/sample{1,2}.5mC.bed.gz: HiFi bodywall 5mC (methbat)
+#
+# WRITES
+#   objects/ bsseq_cov5_chrmt.rds (strand-collapsed CpGs, cov>=5 in all 4;
+#            reused by higher batches); hifi_bodywall_cpg_persample_chrmt.rds
+#   data/    per_sample_methylation, genomewide_methylation_1mb,
+#            region_methylation{,_signal}, genebody_methylation_per_gene,
+#            genebody_{expression_correlation,decile_summary}, decile10_*,
+#            metagene_{genebody_decile,tss5kb_decile,tss5kb_delta,region_decile,
+#            region_decile_bodywall}, {mt,global}_methylation_3groups,
+#            hifi_wgbs_agreement, sample_pca_coords  (all .tsv)
+#   figures/main/ fig2a,b(3 tracks),d(blastema),e,f(blastema),g(blastema),j ; figures/supplementary/ figS_* (incl.
+#            *_control, *_pooled, tss5kb 3 conditions, fig2g bodywall) + fig2i
+#
+# SECTION MAP (numbers match the cat() progress tags, which are code and stay;
+# note [8b]/[8c] sit AFTER [9f] in file order)
+#   [0]  setup: seed, packages, pinned versions, paths, palettes, save_fig
+#   [1]  bsseq from the 4 CpG reports    [2]  GFF gene models
+#   [3]  tail expression deciles (VST)   [4]  figS per-chromosome 1 Mb
+#   [4b] fig2a -> drawn in [9e]         [5]  fig2b x axis -> control/blastema/bodywall panel drawn in [9e]
+#   [5b] region sets                     [6]  fig2e region means
+#   [6b] fig2j methylation-mass pie      [7]  fig2f gene-body deciles
+#   [7b] quoted stats + decile-10 dip    [8]  figS gene-body metagene
+#   [9]  fig2d TSS±5kb metagene, 3 conditions (9a HiFi load, 9b bodywall
+#        deciles, 9c binning + figS delta)
+#   [9d/9e] figS mito + global methylation, 3 groups
+#   [9f] HiFi vs WGBS agreement (the manuscript numbers)
+#   [8b] figS discrete-region metagene, WGBS tail
+#   [8c] fig2g discrete-region metagene, HiFi bodywall
+#   [10] fig2i sample PCA + correlation  [11] tombstone + sessionInfo
+#
+# RULES  fixed seed 20260426; keep_chr = chr1-31 + HiC_scaffold_1563 (32-sequence
+#   chr+mt universe); this ONE script produces every object,
+#   table and figure of 02_landscape (rule 3).
+# RUN  ~3 min, ~96 GB on a clean run (measured); R 4.4.1 / Bioconductor 3.20;
+#   full package record written to sessionInfo_02_landscape.txt at the end of the run.
+# ==============================================================================
 
-# Step 1 - Seed, packages, paths, chromosome set, palettes, theme and figure saver
+# ---- [0] Setup: seed, packages, paths, palettes, helpers ----------------------
+
 set.seed(20260426)
 suppressPackageStartupMessages({
   library(data.table); library(GenomicRanges); library(IRanges)
   library(Biostrings); library(bsseq); library(ggplot2); library(scales)
   library(patchwork)
 })
+# rtracklayer and DESeq2 are attached later, where first used (MethylSeekR is no
+# longer loaded anywhere — Panel H removed, see the [11] tombstone).
 
+# Pinned package versions, validated under R 4.4.1 / Bioc 3.20 (Fenix, /opt/apps/r):
+#   data.table 1.18.4  GenomicRanges 1.58.0  IRanges 2.40.1  Biostrings 2.74.1
+#   bsseq 1.42.0  ggplot2 4.0.2  scales 1.4.0  patchwork 1.3.2
+#   rtracklayer 1.66.0  DESeq2 1.46.0  GenomeInfoDb 1.42.3
+
+# Paths: every source path is read-only; all writes stay inside 02_landscape/ (rule 1).
 PIPE   <- "/mnt/data/alfredvar/rlopezt/meth_paper/main/methylation_pipeline"
 GFF    <- "/mnt/data/alfredvar/30-Genoma/31-Alternative_Annotation_EviAnn/derLaeGenome_namesDlasi_v2.fasta.functional_note.pseudo_label.gff"
 HTSEQ  <- "/mnt/data/alfredvar/jmiranda/20-Transcriptomic_Bulk/25-metaAnalysisTranscriptome/counts_HTseq_EviAnn"
@@ -27,13 +74,13 @@ CPG <- c(C1 = file.path(MCALL, "C1.CpG_report.txt.gz"),
          C2 = file.path(MCALL, "C2.CpG_report.txt.gz"),
          A1 = file.path(MCALL, "A1.CpG_report.txt.gz"),
          A2 = file.path(MCALL, "A2.CpG_report.txt.gz"))
-B01    <- file.path(PIPE, "01_genome_toolkit/objects")   # 01_genome_toolkit objects
+B01    <- file.path(PIPE, "01_genome_toolkit/objects")            # lower batch (rule 4)
 BATCH  <- file.path(PIPE, "02_landscape")
 OBJ <- file.path(BATCH, "objects"); DAT <- file.path(BATCH, "data")
 FIGM <- file.path(BATCH, "figures/main"); FIGS <- file.path(BATCH, "figures/supplementary")
 for (d in c(OBJ, DAT, FIGM, FIGS)) dir.create(d, showWarnings = FALSE, recursive = TRUE)
 
-keep_chr <- c(paste0("chr", 1:31), "HiC_scaffold_1563")   # chr1-31 + mito scaffold
+keep_chr <- c(paste0("chr", 1:31), "HiC_scaffold_1563")
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
 COL_COND <- c(Control = "#2166AC", Amputated = "#B2182B")
@@ -44,18 +91,22 @@ theme_pub <- function(base_size = 9) theme_classic(base_size = base_size, base_f
   theme(plot.title = element_text(size = 10, face = "bold"),
         plot.subtitle = element_text(size = 8, colour = "grey30"),
         panel.grid.major.y = element_line(linewidth = 0.25, colour = "grey90"))
-# cairo_pdf so Unicode glyphs in axis labels render in the PDF
 save_fig <- function(p, dir, name, w, h) {
+  # cairo_pdf so Unicode glyphs (the β in axis labels) render in the PDF
   ggsave(file.path(dir, paste0(name, ".pdf")), p, width = w, height = h, device = cairo_pdf)
   ggsave(file.path(dir, paste0(name, ".png")), p, width = w, height = h, dpi = 150)
   ggsave(file.path(dir, paste0(name, ".svg")), p, width = w, height = h)   # vector (svg)
   cat(sprintf("  saved %s\n", name))
 }
 
-# Step 2 - Strand-collapsed bsseq from the four CpG reports, cov >= 5 in all (cached)
+# ---- [1] Build strand-collapsed bsseq from the 4 CpG reports (cached) ---------
+# Collapses the - strand C onto its + partner and sums; keeps CpGs with cov>=5
+# in ALL four samples (the project-wide bsseq_cov5 rule).
+# bsseq_cov5.rds (chr1-31 only) is superseded and must never be reused.
+# Skip-if-exists: delete the .rds to force a rebuild after any input/code change.
 cat("[1] bsseq (strand-collapsed CpG, cov>=5 all samples)\n")
 bs_rds <- file.path(OBJ, "bsseq_cov5_chrmt.rds")
-stale_cache <- function(cache, inputs) !file.exists(cache) || any(file.mtime(inputs) > file.mtime(cache))   # rebuild when any input is newer than the cache
+stale_cache <- function(cache, inputs) !file.exists(cache) || any(file.mtime(inputs) > file.mtime(cache))
 if (!stale_cache(bs_rds, CPG)) {
   bs <- readRDS(bs_rds)
 } else {
@@ -82,17 +133,17 @@ if (!stale_cache(bs_rds, CPG)) {
 chrs <- as.character(seqnames(bs)); bs <- bs[chrs %in% keep_chr, ]   # defensive re-filter of the cached object
 gr <- granges(bs)
 M  <- as.matrix(getCoverage(bs, type = "M")); Cv <- as.matrix(getCoverage(bs, type = "Cov"))
-samp <- sampleNames(bs); cond <- as.character(pData(bs)$condition)   # design taken from the object
+samp <- sampleNames(bs); cond <- as.character(pData(bs)$condition)
 stopifnot(identical(sort(unique(cond)), c("Amputated", "Control")))
 cat(sprintf("  %s CpGs x %d samples\n", format(nrow(M), big.mark = ","), ncol(M)))
 
-# Pooled per-condition counts and per-sample mean beta, used by several panels
+# pooled per-condition betas (used by several panels)
 M_ctrl <- rowSums(M[, cond == "Control", drop = FALSE]); C_ctrl <- rowSums(Cv[, cond == "Control", drop = FALSE])
 M_amp  <- rowSums(M[, cond == "Amputated", drop = FALSE]); C_amp  <- rowSums(Cv[, cond == "Amputated", drop = FALSE])
 beta_cpg_per <- colMeans(M / pmax(Cv, 1L), na.rm = TRUE)
 gmean_global <- mean(beta_cpg_per)
 
-# Step 3 - GFF gene models (01_genome_toolkit object when present, otherwise imported)
+# ---- [2] GFF gene models (01_genome_toolkit's object if present, else import) -----------
 cat("[2] gff\n")
 gff_rds <- file.path(B01, "gff_chrmt.rds")
 if (file.exists(gff_rds)) {
@@ -100,13 +151,15 @@ if (file.exists(gff_rds)) {
 } else {
   suppressPackageStartupMessages(library(rtracklayer))
   gff <- import(GFF); gff <- gff[as.character(seqnames(gff)) %in% keep_chr]
+  # the mito scaffold has no EviAnn features, so keep only present levels, then
+  # add the empty mito level to match the genome's 32 sequences
   gff <- GenomeInfoDb::keepSeqlevels(gff, intersect(keep_chr, GenomeInfoDb::seqlevels(gff)),
                                      pruning.mode = "coarse")
   GenomeInfoDb::seqlevels(gff) <- keep_chr
 }
 gene_gr <- gff[gff$type == "gene"]
 
-# Step 4 - Tail expression deciles (HTSeq -> DESeq2 VST) and the per-CpG pooled table
+# ---- [3] Tail expression deciles (HTSeq -> DESeq2 VST) ------------------------
 cat("[3] tail expression deciles\n")
 suppressPackageStartupMessages(library(DESeq2))
 tail_s <- c("C1S1","C2S2","C3S3","C4S4","T2S6","T3S7","T4S8")
@@ -115,15 +168,17 @@ cl <- lapply(tail_s, function(s) {
              header = FALSE, col.names = c("gene_id","count"))
   x[!startsWith(gene_id, "__")]
 })
-gids <- cl[[1]]$gene_id
+gids <- cl[[1]]$gene_id   # NOTE: assumes every HTSeq file lists genes in this order (unchecked)
 stopifnot(sapply(cl, function(x) identical(x$gene_id, gids)))  # HTSeq files must share row order or counts misassign silently
 cm <- sapply(cl, function(x) x$count); rownames(cm) <- gids; colnames(cm) <- tail_s
 gid_chr <- sub(";.*", "", as.character(mcols(gff[gff$type == "gene"])$ID))   # keep_chr gene universe (gff is already filtered)
-cm <- cm[rownames(cm) %in% gid_chr, , drop = FALSE]   # keep_chr universe before the VST
+cm <- cm[rownames(cm) %in% gid_chr, , drop = FALSE]
 cm <- cm[rowSums(cm >= 5) >= 2, , drop = FALSE]        # expressed: >= 5 reads in >= 2 libraries (same prefilter as 01's DE)
 vsd <- vst(DESeqDataSetFromMatrix(cm, data.frame(s = tail_s), ~ 1), blind = TRUE)
 expr <- rowMeans(assay(vsd))
-# Per-condition expression means, so methylation can be compared to the matching transcriptome
+# Per-condition means too, so methylation is correlated against the MATCHING
+# transcriptome (ctrl WGBS vs ctrl RNA-seq, amp vs amp), not the pooled tail
+# mean. Tail RNA-seq = 4 control + 3 amputated.
 ctrl_rna <- c("C1S1","C2S2","C3S3","C4S4"); amp_rna <- c("T2S6","T3S7","T4S8")
 ex_dt <- data.table(gene_id = names(expr), expr_mean = as.numeric(expr),
                     expr_ctrl = as.numeric(rowMeans(assay(vsd)[, ctrl_rna, drop = FALSE])),
@@ -139,13 +194,14 @@ gene_dt <- gene_dt[is.finite(expr_mean)]
 gene_dt[, decile := cut(expr_mean, quantile(expr_mean, seq(0, 1, 0.1), na.rm = TRUE),
                         labels = 1:10, include.lowest = TRUE)]
 
-# Per-CpG pooled coverage and beta for control and amputated, keyed for overlaps
+# per-CpG pooled table for overlaps
 cpg_r <- data.table(chr = as.character(seqnames(gr)), pos = start(gr),
                     cv_c = C_ctrl, cv_a = C_amp,
                     bg_c = M_ctrl / pmax(C_ctrl, 1), bg_a = M_amp / pmax(C_amp, 1))
 cpg_r[, `:=`(start = pos, end = pos)]
 
-# Step 5 - figS_per_chromosome_methylation: per-sample beta in 1 Mb windows
+# ---- [4] figS: per-chromosome methylation, 1 Mb windows -----------------------
+# QC-style panel; kept out of the main figures.
 cat("[4] per-chromosome methylation (supplementary)\n")
 chr_vec <- as.character(seqnames(gr)); win_idx <- (start(gr) %/% 1e6) * 1e6
 per <- rbindlist(lapply(seq_len(ncol(M)), function(i)
@@ -170,35 +226,18 @@ save_fig(pa, FIGS, "figS_per_chromosome_methylation", 8.5, 10.5)
 fwrite(data.table(sample = samp, condition = cond, beta_cpg_mean = beta_cpg_per),
        file.path(DAT, "per_sample_methylation.tsv"), sep = "\t")
 
-# Step 6 - fig2a: global CpG methylation per sample
-cat("[4b] fig2a global methylation per sample\n")
-gm <- data.table(sample = factor(samp, levels = samp),
-                 condition = factor(cond, levels = c("Control","Amputated")),
-                 beta = beta_cpg_per * 100)
-pa0 <- ggplot(gm, aes(sample, beta, fill = condition)) +
-  geom_col(width = 0.58, alpha = 0.92) +
-  geom_text(aes(label = sprintf("%.1f", beta)), vjust = -0.55, size = 3,
-            fontface = "bold", colour = "grey15") +
-  scale_fill_manual(values = COL_COND, name = NULL) +
-  scale_y_continuous(limits = c(0, NA), breaks = seq(0, 20, 5),
-                     expand = expansion(mult = c(0, 0.12))) +
-  labs(x = NULL, y = "Mean CpG methylation β (%)",
-       title = "Global CpG methylation per sample") +
-  theme_pub() +
-  theme(legend.position = "top",
-        legend.key.size = unit(9, "pt"),
-        plot.title = element_text(size = 9.5, face = "bold"),
-        plot.margin = margin(5.5, 9, 5.5, 5.5),
-        axis.line.x = element_line(linewidth = 0.3, colour = "grey30"),
-        axis.line.y = element_blank(),
-        axis.ticks.y = element_blank())
-save_fig(pa0, FIGM, "fig2a_global_methylation_per_sample", 3.1, 2.3)
+# ---- [4b] fig2a: global CpG methylation per sample ----------------------------
+# Drawn in [9e], after the HiFi bodywall object exists, so that fig2a shows tail control, tail
+# blastema AND bodywall. The four-library version drawn here before
+# that date is superseded; the panel code lives at the end of [9e].
+cat("[4b] fig2a deferred to [9e] (needs HiFi bodywall)\n")
 
-# Step 7 - fig2b: pooled genome-wide methylation in 1 Mb windows
+# ---- [5] fig2b: pooled genome-wide 1 Mb track ---------------------------------
 cat("[5] fig2b genome-wide 1 Mb\n")
 cpg <- data.table(chr = chr_vec, pos = start(gr), Mt = M_ctrl + M_amp, Ct = C_ctrl + C_amp)
 cpg[, win := (pos %/% 1e6) * 1e6]
 agg <- cpg[, .(beta = sum(Mt)/pmax(sum(Ct),1)), by = .(chr, win)]
+# The data table still lists every window, mito included.
 agg[, chr := factor(chr, levels = keep_chr)]; agg[, end := win + 1e6 - 1]
 agg_plot <- agg[chr != "HiC_scaffold_1563"]; agg_plot[, chr := droplevels(chr)]
 clen <- agg_plot[, .(maxpos = max(end)), by = chr][order(chr)]
@@ -207,7 +246,7 @@ agg_plot <- merge(agg_plot, clen[, .(chr, offset)], by = "chr")
 agg_plot[, x := (win + end)/2 + offset]; agg_plot[, band := as.integer(chr) %% 2]
 chr_mid <- agg_plot[, .(mid = mean(x)), by = chr][order(chr)]
 chr_lab <- sub("chr", "", as.character(chr_mid$chr))
-chr_lab[chr_lab %in% c("27", "29", "31")] <- ""   # thin the crowded right-end tick labels
+chr_lab[chr_lab %in% c("27", "29", "31")] <- ""
 pb <- ggplot(agg_plot, aes(x, beta*100, colour = factor(band))) +
   geom_point(size = 0.35, alpha = 0.6) +
   geom_hline(yintercept = gmean_global*100, colour = "#C0392B", linetype = "dashed", linewidth = 0.6) +
@@ -216,22 +255,23 @@ pb <- ggplot(agg_plot, aes(x, beta*100, colour = factor(band))) +
   labs(x = "Chromosome", y = "Mean CpG methylation β (%)",
        title = "Pooled genome-wide methylation (1 Mb)") +
   theme_pub() + theme(axis.text.x = element_text(size = 6))
-save_fig(pb, FIGM, "fig2b_genomewide_1mb", 6.8, 1.96)
 fwrite(agg[, .(chr, win_start = as.integer(win), beta_pct = beta*100)],   # integer, never scientific notation
        file.path(DAT, "genomewide_methylation_1mb.tsv"), sep = "\t")
 
-# Step 8 - Region sets: promoter (2 kb upstream of the TSS), exon, intron, genic
+# ---- [5b] Region sets (promoter / exon / intron / intergenic) -----------------
+# Promoter = 2 kb upstream ending AT the TSS (the project-wide window).
 exons_gr <- gff[gff$type == "exon"]
 seqlengths(gene_gr) <- NA
 prom <- trim(suppressWarnings(promoters(gene_gr, 2000, 0)))
-# Strand-neutralise before reduce()/setdiff(): GRanges set operations are strand-aware
 gu <- gene_gr; strand(gu) <- "*"; eu <- exons_gr; strand(eu) <- "*"; pu <- prom; strand(pu) <- "*"
 body <- reduce(gu); exon_r <- reduce(eu)
 intron <- GenomicRanges::setdiff(body, exon_r)
 genic <- reduce(c(granges(body), granges(pu))); strand(genic) <- "*"; genic <- reduce(genic)
 region_gr <- list(Promoter = reduce(granges(pu)), Exon = exon_r, Intron = intron)
 
-# Step 9 - fig2e: mean methylation per region (regions may overlap)
+# ---- [6] fig2e: mean methylation per region (bar) -----------------------------
+# Region definitions OVERLAP here (a CpG can count in promoter AND exon) — the
+# per-region LEVELS tolerate that; the exclusive partition lives in [6b].
 cat("[6] fig2e region mean methylation\n")
 setkey(cpg_r, chr, start, end)
 region_beta <- function(rgr) {
@@ -244,7 +284,7 @@ region_beta <- function(rgr) {
 reg_rows <- rbindlist(lapply(names(region_gr), function(nm) {
   v <- region_beta(region_gr[[nm]])
   data.table(region = nm, mean_beta = v["beta"], n = v["n"], meth = v["meth"]) }))
-# Intergenic = CpGs not overlapping any gene body or promoter
+# intergenic = CpGs not overlapping genic
 genic_dt <- data.table(chr = as.character(seqnames(genic)), start = start(genic), end = end(genic))
 setkey(genic_dt, chr, start, end)
 ov_g <- foverlaps(cpg_r, genic_dt, nomatch = NA, which = TRUE)
@@ -263,10 +303,13 @@ pe <- ggplot(reg_rows, aes(region, mean_beta*100, fill = region)) +
   theme_pub()
 save_fig(pe, FIGM, "fig2e_region_methylation", 3.7, 2.63)
 
-# Step 10 - fig2j: share of methylated reads per region, exclusive partition
+# ---- [6b] fig2j: share of methylation MASS per region (pie) -------------------
+# fig2e = mean LEVEL per region; this pie = each region's fraction of the
+# genome's total methylated-CpG reads. EXCLUSIVE partition (each read counted
+# ONCE), priority Promoter > Exon > Intron > Intergenic — a mass pie must
+# partition or the slices sum to >100%.
 cat("[6b] fig2j region methylation-signal pie\n")
 cpg_gr <- GRanges(cpg_r$chr, IRanges(cpg_r$start, width = 1))
-# Priority Promoter > Exon > Intron > Intergenic so each CpG is counted once
 ra <- rep("Intergenic", length(cpg_gr))
 ra[overlapsAny(cpg_gr, body)]                <- "Intron"
 ra[overlapsAny(cpg_gr, exon_r)]              <- "Exon"
@@ -278,6 +321,7 @@ pj <- ggplot(reg_pie, aes("", frac, fill = region)) +
   geom_col(width = 1, colour = "white") + coord_polar(theta = "y") +
   geom_text(aes(label = sprintf("%.0f%%", 100*frac)),        # only the number on the slice
             position = position_stack(vjust = 0.5), size = 3.0) +
+  # region names go in a coloured-dot legend (invisible point layer); only % on slices
   geom_point(aes(colour = region), x = 1, y = 0, alpha = 0, inherit.aes = FALSE) +
   scale_fill_manual(values = COL_REGION, guide = "none") +
   scale_colour_manual(values = COL_REGION, name = NULL,
@@ -290,7 +334,7 @@ pj <- ggplot(reg_pie, aes("", frac, fill = region)) +
 save_fig(pj, FIGM, "fig2j_region_methylation_pie", 4.2, 4.0)
 fwrite(reg_pie, file.path(DAT, "region_methylation_signal.tsv"), sep = "\t")
 
-# Step 11 - Gene-body methylation per gene by tail expression decile
+# ---- [7] fig2f: gene-body methylation per gene, by expression decile ----------
 cat("[7] fig2f gene-body methylation by decile\n")
 gene_full <- gene_dt[, .(gene_id, chr, start, end, strand, decile)]
 setkey(gene_full, chr, start, end)
@@ -298,12 +342,21 @@ ov2 <- foverlaps(cpg_r, gene_full, nomatch = 0L)
 gb <- ov2[, .(beta = (sum(bg_c*cv_c)+sum(bg_a*cv_a))/pmax(sum(cv_c)+sum(cv_a),1), n_cpg = .N),
           by = .(gene_id, decile)][n_cpg >= 5 & !is.na(decile)]   # per-gene floor: >=5 covered CpGs; expressed genes only
 fwrite(gb, file.path(DAT, "genebody_methylation_per_gene.tsv"), sep = "\t")
+# The pooled table above is unchanged (07_wgcna reads it).
+gb_cond <- ov2[, .(beta_control  = sum(bg_c*cv_c)/pmax(sum(cv_c),1), n_cpg_control  = sum(cv_c > 0),
+                   beta_blastema = sum(bg_a*cv_a)/pmax(sum(cv_a),1), n_cpg_blastema = sum(cv_a > 0), n_cpg = .N),
+               by = .(gene_id, decile)][n_cpg >= 5 & !is.na(decile)]   # same per-gene floor as the pooled table
+fwrite(gb_cond, file.path(DAT, "genebody_methylation_per_gene_by_condition.tsv"), sep = "\t")
 
-# Step 12 - Methylation vs expression statistics and the decile-10 split
+# ---- [7b] Statistics the text quotes + the decile-10 dip ----------------------
+# Every number of the "gene-body methylation correlates with transcription"
+# paragraphs gets a producing line here (before that they were
+# re-derived by hand). Writes: genebody_expression_correlation (Spearman rho),
+# genebody_decile_summary, decile10_unmethylated_vs_methylated, decile10_genes.
 cat("[7b] methylation vs expression statistics + the decile-10 dip\n")
 gbx <- merge(gb, gene_dt[, .(gene_id, expr_mean, length_bp = end - start + 1L)], by = "gene_id")
 ct <- cor.test(gbx$beta, gbx$expr_mean, method = "spearman", exact = FALSE)   # STAT TEST: Spearman rank correlation
-# The Spearman P underflows at this n; the machine floor is written instead of 0
+# P underflows to 0 at n ~ 19k (t approximation): report the machine floor, not a literal 0
 fwrite(data.table(statistic = c("spearman_rho", "spearman_P", "n_genes"),
                   value = c(unname(ct$estimate), max(ct$p.value, .Machine$double.xmin), nrow(gbx))),   # floor, not a literal 0
        file.path(DAT, "genebody_expression_correlation.tsv"), sep = "\t")
@@ -313,18 +366,33 @@ dec_sum <- gbx[, .(n = .N, median_beta = median(beta), q1_beta = quantile(beta, 
 fwrite(dec_sum, file.path(DAT, "genebody_decile_summary.tsv"), sep = "\t")
 cat(sprintf("  Spearman rho(beta, expression) = %.3f (n = %s)\n", ct$estimate, format(nrow(gbx), big.mark = ",")))
 print(dec_sum)
-# Decile-10 split at beta < 0.10; compare length, CpG count and density, symbols, ribosomal genes, DE
+# the same two statistics per condition (Fig 3A is the blastema panel; the control panel is supplementary)
+gbcx <- merge(gb_cond, gene_dt[, .(gene_id, expr_mean)], by = "gene_id")
+cond_cor <- rbindlist(lapply(c("control", "blastema"), function(cn) {
+  b <- gbcx[[paste0("beta_", cn)]]; ok <- is.finite(b)
+  cc <- cor.test(b[ok], gbcx$expr_mean[ok], method = "spearman", exact = FALSE)   # STAT TEST: Spearman rank correlation, per condition
+  data.table(condition = cn, spearman_rho = unname(cc$estimate), spearman_P = max(cc$p.value, .Machine$double.xmin), n_genes = sum(ok)) }))
+fwrite(cond_cor, file.path(DAT, "genebody_expression_correlation_by_condition.tsv"), sep = "\t")
+dec_sum_cond <- rbindlist(lapply(c("control", "blastema"), function(cn) {
+  d <- copy(gbcx); d[, b := get(paste0("beta_", cn))]
+  d[, .(condition = cn, n = .N, median_beta = median(b), q1_beta = quantile(b, 0.25), q3_beta = quantile(b, 0.75),
+        pct_beta_below_0.10 = 100 * mean(b < 0.10)), by = decile] }))[order(condition, as.integer(as.character(decile)))]
+fwrite(dec_sum_cond, file.path(DAT, "genebody_decile_summary_by_condition.tsv"), sep = "\t")
+cat("  per condition:\n"); print(cond_cor); print(dec_sum_cond)
+# Decile-10 dip: split the top decile at beta < 0.10 ("unmethylated"); compare on
+# length / CpG count / CpG density (Mann-Whitney; rank-biserial r = 2U/(n1 n2) - 1,
+# positive = unmethylated ranks higher), symbol availability, ribosomal membership
+# (name heuristic: ^Rp[ls] excluding Rps6k*) and strict DE (01_genome_toolkit table).
 d10 <- gbx[decile == "10"]
 d10[, state := ifelse(beta < 0.10, "unmethylated", "methylated")]
 note_all <- vapply(mcols(gene_gr)$Note, function(x) if (length(x)) as.character(x)[1] else NA_character_, character(1))
 sym_all  <- sub("^Similar to ([^:]+):.*$", "\\1", note_all); sym_all[!grepl("^Similar to [^:]+:", note_all)] <- NA
 d10[, symbol := setNames(sym_all, gid_all)[gene_id]]
-# Ribosomal protein genes by symbol (^Rp[ls], excluding Rps6k*)
 d10[, ribosomal := !is.na(symbol) & grepl("^Rp[ls]", symbol, ignore.case = TRUE) & !grepl("^Rps6k", symbol, ignore.case = TRUE)]
 d10[, cpg_per_kb := 1000 * n_cpg / length_bp]
 DE_TAIL2 <- file.path(PIPE, "01_genome_toolkit/data/gene_de_tail.tsv")                 # 01_genome_toolkit (upstream)
 de2 <- fread(DE_TAIL2)[, .(gene_id, log2FoldChange, padj)]
-de2[, de_strict := !is.na(padj) & padj < 0.05 & abs(log2FoldChange) >= 1]   # the paper's DE definition
+de2[, de_strict := !is.na(padj) & padj < 0.05 & abs(log2FoldChange) >= 1]    # the paper's DE definition (143 genes)
 d10 <- merge(d10, de2, by = "gene_id", all.x = TRUE)
 fwrite(d10[order(state, -beta), .(gene_id, symbol, state, beta, n_cpg, length_bp, cpg_per_kb, expr_mean,
                                    ribosomal, log2FoldChange, padj, de_strict)],
@@ -335,7 +403,7 @@ t_len <- mw(u$length_bp, m$length_bp); t_cpg <- mw(u$n_cpg, m$n_cpg); t_den <- m
 named_u <- sum(!is.na(u$symbol)); named_m <- sum(!is.na(m$symbol))
 f_rib <- fisher.test(matrix(c(sum(u$ribosomal), named_u - sum(u$ribosomal),
                               sum(m$ribosomal), named_m - sum(m$ribosomal)), 2))   # STAT TEST: Fisher, among named genes
-# Strict DE among unmethylated decile-10 genes vs all other genes in the DE table
+# strict DE among the unmethylated decile-10 genes vs all other genes in the DE table
 de_bg <- de2[!gene_id %in% u$gene_id]
 f_de <- fisher.test(matrix(c(sum(u$de_strict, na.rm = TRUE), sum(!u$de_strict, na.rm = TRUE),
                              sum(de_bg$de_strict), sum(!de_bg$de_strict)), 2))   # STAT TEST: Fisher
@@ -360,17 +428,17 @@ dip <- rbindlist(list(
 fwrite(dip, file.path(DAT, "decile10_unmethylated_vs_methylated.tsv"), sep = "\t")
 cat("  decile-10 dip:\n"); print(dip)
 
-# Step 13 - fig2f: per-gene gene-body methylation by expression decile
-pf <- ggplot(gb, aes(decile, beta*100, fill = decile)) +
+decile_box <- function(dd, ycol, ttl) ggplot(dd, aes(decile, get(ycol)*100, fill = decile)) +
   geom_boxplot(width = 0.7, outlier.size = 0.2, outlier.alpha = 0.3, linewidth = 0.25) +
   scale_fill_manual(values = setNames(DECILE_PAL, 1:10), guide = "none") +
-  labs(x = "Tail absolute expression decile (1=low, 10=high)", y = "Gene-body β (%)",
-       title = "Gene-body methylation by expression decile") + theme_pub()
-save_fig(pf, FIGM, "fig2f_genebody_methylation_decile", 4.6, 3.0)
+  labs(x = "Tail absolute expression decile (1=low, 10=high)", y = "Gene-body β (%)", title = ttl) + theme_pub()
+save_fig(decile_box(gb_cond, "beta_blastema", "Gene-body methylation, blastema"), FIGM, "fig2f_genebody_methylation_decile_blastema", 4.6, 3.0)
+save_fig(decile_box(gb_cond, "beta_control",  "Gene-body methylation, tail control (WGBS)"), FIGS, "figS_genebody_methylation_decile_control", 4.6, 3.0)
+save_fig(decile_box(gb, "beta", "Gene-body methylation, tail pooled (WGBS)"), FIGS, "figS_genebody_methylation_decile_pooled", 4.6, 3.0)
 
-# Step 14 - figS_genebody_metagene_decile: 100-bin gene-body metagene by decile
+# ---- [8] figS: gene-body metagene by decile (moved out of main) ---------------
 cat("[8] gene-body metagene by decile (supplementary)\n")
-nb <- 100L   # 100 bins along the gene body
+nb <- 100L                                  # 100 bins -> smooth profile (was 20)
 setkey(gene_full, chr, start, end)
 ovc <- foverlaps(cpg_r, gene_full, nomatch = 0L)
 ovc[, rel := (pos - start)/pmax(end - start, 1)]
@@ -391,12 +459,20 @@ pc <- ggplot(mgc, aes(bin, mean_beta*100, colour = decile, group = decile)) +
   theme(legend.position = "right")
 save_fig(pc, FIGS, "figS_genebody_metagene_decile", 6.5, 3.2)
 
-# Step 15 - fig2d: TSS +/- 5 kb metagene by decile, tail control, tail blastema, bodywall
+# ---- [9] fig2d: TSS ± 5 kb metagene by decile — THREE conditions --------------
+# Tail control + Tail blastema (WGBS pooled betas,
+# tail deciles) AND Bodywall (PacBio HiFi native 5mC; deciles from the
+# irradiation-experiment CONTROL libraries dcrep1,2,3,6 only — dcrep4 is the
+# WGCNA expression outlier, and RNA-seq is never pooled across experiments).
 cat("[9] fig2d TSS metagene (Tail control / Tail blastema / Bodywall)\n")
 
-# Step 15.1 - HiFi bodywall CpG methylome, cov >= 5 in both samples (cached)
-# methbat beds are already strand-combined (one row per CpG dyad); they are not collapsed again
+##     (one row per dyad, strand ".", type "Total") — never
+##     collapse them again. Keep chr1-31+mito, cov>=5 in BOTH samples (mirrors
+##     the WGBS cov>=5-in-all rule).
 HIFI <- file.path(PIPE, "00_data_pacbio_hifi")
+# The _persample cache keeps cov/mod per slug (needed by the 3-group figS panels);
+# the pooled-only hifi_bodywall_cpg_chrmt.rds is superseded. Skip-if-exists cache:
+# delete the .rds to force a rebuild.
 hifi_rds <- file.path(OBJ, "hifi_bodywall_cpg_persample_chrmt.rds")
 if (file.exists(hifi_rds)) {
   hifi <- readRDS(hifi_rds)
@@ -411,15 +487,16 @@ if (file.exists(hifi_rds)) {
   h1 <- read_hifi(file.path(HIFI, "sample1.5mC.bed.gz"))
   h2 <- read_hifi(file.path(HIFI, "sample2.5mC.bed.gz"))
   hifi <- merge(h1, h2, by = c("chr", "pos"), suffixes = c("_1", "_2"))
-  hifi <- hifi[cov_1 >= 5 & cov_2 >= 5]   # cov>=5 in both samples
+  hifi <- hifi[cov_1 >= 5 & cov_2 >= 5]          # cov>=5 in BOTH slugs (project rule)
   saveRDS(hifi, hifi_rds)                        # per-sample cov/mod kept in the cache
 }
+# pooled betas computed at load (cheap), per-sample columns stay available
 hifi[, `:=`(bg_bw = (mod_1 + mod_2) / (cov_1 + cov_2), cv_bw = cov_1 + cov_2)]
 hifi[, `:=`(start = pos, end = pos)]
 cat(sprintf("  HiFi bodywall CpGs (cov>=5 in both samples): %s\n",
             format(nrow(hifi), big.mark = ",")))
 
-# Step 15.2 - Bodywall expression deciles from the four control libraries (tail recipe)
+## 9b. bodywall expression deciles (HTSeq -> DESeq2 VST, same recipe as tail)
 bws <- c("dcrep1", "dcrep2", "dcrep3", "dcrep6")
 bwl <- lapply(bws, function(s) {
   x <- fread(file.path(HTSEQ, paste0(s, "_htseq_gene_counts.txt")),
@@ -438,7 +515,7 @@ gene_bw <- gene_bw[is.finite(expr_bw)]
 gene_bw[, decile := cut(expr_bw, quantile(expr_bw, seq(0, 1, 0.1), na.rm = TRUE),
                         labels = 1:10, include.lowest = TRUE)]
 
-# Step 15.3 - Bin the three methylomes on the same TSS +/- 5 kb grid and draw fig2d
+## 9c. bin all three methylomes on the same TSS +-5 kb grid
 flank <- 5000L; nbt <- 100L; bw <- (2*flank)/nbt
 tss_bins <- function(cpgs, genes) {       # cpgs: chr/start/end + signal columns
   gwx <- copy(genes); gwx[, `:=`(ws = tss - flank, we = tss + flank)]
@@ -457,7 +534,7 @@ mgt <- ovt[, .(`Tail control`  = sum(bg_c*cv_c)/pmax(sum(cv_c),1),
 ovb <- tss_bins(hifi, gene_bw[, .(gene_id, chr, tss, strand, decile)])
 mgb <- ovb[, .(condition = "Bodywall",
                beta = sum(bg_bw*cv_bw)/pmax(sum(cv_bw),1)), by = .(decile, bc)]
-mgl <- rbind(data.table::melt(mgt, id.vars = c("decile","bc"), variable.name = "condition",   # data.table::melt, namespaced
+mgl <- rbind(data.table::melt(mgt, id.vars = c("decile","bc"), variable.name = "condition",
                   value.name = "beta"),
              mgb[, .(decile, bc, condition, beta)])
 mgl[, condition := factor(condition,
@@ -475,9 +552,16 @@ pd <- ggplot(mgl, aes(bc/1000, beta*100, colour = decile, group = decile)) +
         legend.key.size = unit(8, "pt"),
         legend.text = element_text(size = 7),
         legend.title = element_text(size = 8))
-save_fig(pd, FIGM, "fig2d_tss5kb_metagene_decile", 7.0, 2.6)
+save_fig(pd, FIGS, "figS_tss5kb_metagene_decile_3conditions", 7.0, 2.6)
+# MAIN fig2d = blastema only; control and bodywall stay in the three-condition supplementary panel above
+pd_bl <- ggplot(mgl[condition == "Tail blastema"], aes(bc/1000, beta*100, colour = decile, group = decile)) +
+  geom_vline(xintercept = 0, colour = "#C0392B", linetype = "dashed", linewidth = 0.45) +
+  geom_line(linewidth = 0.6) +
+  scale_colour_manual(values = setNames(DECILE_PAL, 1:10), name = "Expr decile", guide = guide_legend(reverse = TRUE)) +
+  labs(x = "Distance from TSS (kb)", y = "Mean β (%)", title = "TSS ± 5 kb metagene, blastema") + theme_pub() +
+  theme(legend.position = "right", legend.key.size = unit(8, "pt"), legend.text = element_text(size = 7), legend.title = element_text(size = 8))
+save_fig(pd_bl, FIGM, "fig2d_tss5kb_metagene_decile_blastema", 4.6, 2.8)
 
-# Step 15.4 - figS_tss5kb_delta_metagene: blastema minus control on the same grid
 mgd <- mgt[, .(decile, bc, dbeta = `Tail blastema` - `Tail control`)]
 fwrite(mgd, file.path(DAT, "metagene_tss5kb_delta.tsv"), sep = "\t")
 p_dlt <- ggplot(mgd, aes(bc/1000, dbeta*100, colour = decile, group = decile)) +
@@ -497,13 +581,14 @@ p_dlt <- ggplot(mgd, aes(bc/1000, dbeta*100, colour = decile, group = decile)) +
         legend.title = element_text(size = 8))
 save_fig(p_dlt, FIGS, "figS_tss5kb_delta_metagene", 5.2, 2.8)
 
-# Step 16 - figS mitochondrial and global methylation for the three groups
+# ---- [9d/9e] figS: the three groups side by side ---------
+# 9d = mitochondrial and 9e = global mean methylation, for Tail control (WGBS
+# C1,C2), Tail blastema (WGBS A1,A2), Bodywall (HiFi BW1,BW2). Same estimator
+# everywhere: unweighted mean of per-CpG beta over each platform's cov>=5-in-all set.
 COL_GRP <- c(`Tail control` = "#2166AC", `Tail blastema` = "#B2182B",
              Bodywall = "#009E73")
-# Same estimator everywhere: unweighted mean of per-CpG beta over each platform's cov >= 5 set
 grp_of <- ifelse(cond == "Control", "Tail control", "Tail blastema")
 
-# Step 16.1 - figS_mt_methylation_3groups: mitochondrial CpG beta per sample
 cat("[9d] figS mitochondrial methylation, 3 groups\n")
 MT <- "HiC_scaffold_1563"
 mt_idx <- which(chr_vec == MT)
@@ -514,6 +599,7 @@ mt_hifi <- rbind(
   hifi[chr == MT, .(grp = "Bodywall", sample = "BW1", beta = mod_1 / cov_1)],
   hifi[chr == MT, .(grp = "Bodywall", sample = "BW2", beta = mod_2 / cov_2)])
 mt3 <- rbind(mt_wgbs, mt_hifi)
+
 mt3[, grp := factor(grp, levels = names(COL_GRP))]
 mt3[, .(n_cpg = .N, mean_beta_pct = 100 * mean(beta)), by = .(grp, sample)] |>
   fwrite(file.path(DAT, "mt_methylation_3groups.tsv"), sep = "\t")
@@ -532,7 +618,6 @@ p_mt <- ggplot(mt3, aes(sample, beta * 100, colour = grp)) +
                       strip.text = element_text(face = "bold"))
 save_fig(p_mt, FIGS, "figS_mt_methylation_3groups", 6.5, 3.2)
 
-# Step 16.2 - figS_global_methylation_3groups: global mean beta per sample
 cat("[9e] figS global mean methylation, 3 groups\n")
 g3 <- rbind(
   data.table(grp = grp_of, sample = samp, beta = beta_cpg_per),
@@ -556,8 +641,82 @@ p_g3 <- ggplot(g3, aes(grp, beta * 100, fill = grp)) +
                         "HiFi cov≥5 in both; points = samples", sep = "\n")) +
   theme_pub()
 save_fig(p_g3, FIGS, "figS_global_methylation_3groups", 4.6, 3.2)
+# ---- fig2a (main): the same six per-sample means as g3, one bar per sample, grouped by group -------
+# Replaces the four-library fig2a formerly drawn at [4b]; palette unchanged (locked)..
+g3[, sample := factor(sample, levels = c("C1", "C2", "A1", "A2", "BW1", "BW2"))]
+pa0 <- ggplot(g3, aes(sample, beta * 100, fill = grp)) +
+  geom_col(width = 0.58, alpha = 0.92) +
+  geom_text(aes(label = sprintf("%.1f", beta * 100)), vjust = -0.55, size = 3,
+            fontface = "bold", colour = "grey15") +
+  scale_fill_manual(values = COL_GRP, name = NULL) +
+  scale_y_continuous(limits = c(0, NA), breaks = seq(0, 20, 5),
+                     expand = expansion(mult = c(0, 0.12))) +
+  labs(x = NULL, y = "Mean CpG methylation \u03b2 (%)",
+       title = "Global CpG methylation per sample") +
+  theme_pub() +
+  theme(legend.position = "top",
+        legend.key.size = unit(9, "pt"),
+        plot.title = element_text(size = 9.5, face = "bold"),
+        plot.margin = margin(5.5, 9, 5.5, 5.5),
+        axis.line.x = element_line(linewidth = 0.3, colour = "grey30"),
+        axis.line.y = element_blank(),
+        axis.ticks.y = element_blank())
+save_fig(pa0, FIGM, "fig2a_global_methylation_per_sample", 3.6, 2.4)
 
-# Step 17 - HiFi vs WGBS agreement on shared CpGs and 1 Mb windows
+# ---- fig2b (main): genome-wide methylation in 1 Mb windows, THREE tracks, no pooled track ----
+# (second): tail control (C1+C2, WGBS), tail blastema (A1+A2, WGBS) and bodywall
+# (BW1+BW2, PacBio HiFi) as three stacked tracks on one x axis; the pooled tail track is dropped, and with it the
+# supplementary WGBS-pooled-vs-HiFi panel (figS_genomewide_1mb_bodywall), which it would duplicate.
+# chr1-31 cumulative coordinates from [5] (WGBS window offsets, applied to HiFi too); mito excluded (figS mito [9d]).
+# Same window definition and pooled estimator (sum M / sum Cov per window) in every track. Dashed line = that
+# track's genome-wide mean of per-CpG beta (control / blastema: mean of the condition-pooled per-CpG beta;
+# bodywall: mean of bg_bw, the HiFi per-CpG beta).
+cpg_cond <- data.table(chr = chr_vec, pos = start(gr), M_c = M_ctrl, C_c = C_ctrl, M_a = M_amp, C_a = C_amp)
+cpg_cond[, win := (pos %/% 1e6) * 1e6]
+agg_cond <- cpg_cond[, .(beta_ctrl = sum(M_c) / pmax(sum(C_c), 1), beta_amp = sum(M_a) / pmax(sum(C_a), 1)), by = .(chr, win)]
+agg_cond[, chr := factor(chr, levels = keep_chr)]
+gmean_ctrl <- mean(M_ctrl / pmax(C_ctrl, 1L)); gmean_amp <- mean(M_amp / pmax(C_amp, 1L))
+agg3 <- merge(agg_plot[, .(chr, win, x, band)], agg_cond[, .(chr, win, beta_ctrl, beta_amp)], by = c("chr", "win"))
+# bodywall HiFi, same windows
+cpg_bw <- hifi[chr %in% keep_chr, .(chr, pos, Mt = mod_1 + mod_2, Ct = cov_1 + cov_2)]
+cpg_bw[, win := (pos %/% 1e6) * 1e6]
+agg_bw <- cpg_bw[, .(beta = sum(Mt) / pmax(sum(Ct), 1), n_cpg = .N), by = .(chr, win)]
+agg_bw[, chr := factor(chr, levels = keep_chr)]; agg_bw[, end := win + 1e6 - 1]
+fwrite(agg_bw[, .(chr, win_start = as.integer(win), n_cpg, beta_pct = beta * 100)],
+       file.path(DAT, "genomewide_methylation_1mb_bodywall.tsv"), sep = "\t")
+agg_bw_plot <- agg_bw[chr != "HiC_scaffold_1563"]; agg_bw_plot[, chr := droplevels(chr)]
+agg_bw_plot <- merge(agg_bw_plot, clen[, .(chr, offset)], by = "chr")       # clen: WGBS offsets from [5]
+agg_bw_plot[, x := (win + end) / 2 + offset]; agg_bw_plot[, band := as.integer(chr) %% 2]
+gmean_bw <- hifi[, mean(bg_bw)]
+TRK <- c("Tail control (WGBS, C1+C2)", "Tail blastema 2 days post amputation (WGBS, A1+A2)", "Bodywall (PacBio HiFi, BW1+BW2)")
+three <- rbind(agg3[, .(chr, x, band, beta = beta_ctrl, track = TRK[1], gmean = gmean_ctrl)],
+               agg3[, .(chr, x, band, beta = beta_amp,  track = TRK[2], gmean = gmean_amp)],
+               agg_bw_plot[, .(chr, x, band, beta, track = TRK[3], gmean = gmean_bw)])
+three[, track := factor(track, levels = TRK)]
+pb3 <- ggplot(three, aes(x, beta * 100, colour = factor(band))) +
+  geom_point(size = 0.35, alpha = 0.6) +
+  geom_hline(aes(yintercept = gmean * 100), colour = "#C0392B", linetype = "dashed", linewidth = 0.6) +
+  facet_wrap(~ track, ncol = 1) +
+  scale_colour_manual(values = c("0" = "#2C3E50", "1" = "#7F8C8D"), guide = "none") +
+  scale_x_continuous(breaks = chr_mid$mid, labels = chr_lab, expand = expansion(mult = 0.005)) +
+  labs(x = "Chromosome", y = "Mean CpG methylation \u03b2 (%)",
+       title = "Genome-wide methylation") +
+  theme_pub() + theme(axis.text.x = element_text(size = 6), strip.background = element_blank(),
+                      strip.text = element_text(face = "bold", hjust = 0, size = 7.5), panel.spacing.y = unit(4, "pt"))
+save_fig(pb3, FIGM, "fig2b_genomewide_1mb", 6.8, 4.8)
+# WGBS window table: per-condition columns (pooled column kept for fig2a/figS per-chromosome users of this file)
+fwrite(merge(agg[, .(chr, win, beta_pct_pooled = beta * 100)], agg_cond[, .(chr, win, beta_pct_control = beta_ctrl * 100, beta_pct_blastema = beta_amp * 100)],
+             by = c("chr", "win"))[order(chr, win), .(chr, win_start = as.integer(win), beta_pct_pooled, beta_pct_control, beta_pct_blastema)],
+       file.path(DAT, "genomewide_methylation_1mb.tsv"), sep = "\t")
+w3 <- merge(agg3[, .(chr, win, beta_ctrl, beta_amp)], agg_bw_plot[, .(chr, win, beta_bw = beta)], by = c("chr", "win"))
+cat(sprintf("  fig2b: %d WGBS windows, %d HiFi windows (chr1-31); genome-wide means control %.2f%%, blastema %.2f%%, bodywall %.2f%%; max |blastema - control| per window %.2f pp; r(1 Mb) control vs bodywall %.3f\n",
+            nrow(agg3), nrow(agg_bw_plot), 100 * gmean_ctrl, 100 * gmean_amp, 100 * gmean_bw,
+            100 * max(abs(agg3$beta_amp - agg3$beta_ctrl)), cor(w3$beta_ctrl, w3$beta_bw)))
+
+# ---- [9f] HiFi vs WGBS agreement statistics (the manuscript numbers) ----------
+# everything the paper reports must be reproducible from
+# the pipeline, so the cross-platform agreement is computed HERE from this batch's
+# own objects (the exploratory main/analysis/hifi_wgbs/ version is not citable).
 cat("[9f] HiFi vs WGBS agreement\n")
 wgbs_cpg <- data.table(chr = chr_vec, pos = start(gr),
                        bg = (M_ctrl + M_amp) / pmax(C_ctrl + C_amp, 1))
@@ -578,10 +737,14 @@ cat(sprintf("  shared CpGs %s | r(CpG) %.3f | r(1Mb) %.3f | median offset %+.3f\
             agree$pearson_r_1mb, agree$median_offset_1mb))
 rm(wgbs_cpg, jn, w1); invisible(gc(FALSE))
 
-# Step 18 - figS_region_decile_metagene_wgbs_tail: discrete-region metagene, WGBS tail
+# ---- [8b] figS: discrete-region metagene, WGBS tail ---------------------------
+# Walk the gene neighbourhood as 9 DISCRETE segments (distal upstream -> promoter
+# -> first exon -> first intron -> internal intron/exon -> last intron -> last
+# exon -> downstream), 10 bins each, all derived from the longest mRNA per gene.
+# Shows the classic pattern (low promoter/first exon, high introns) by decile.
 cat("[8b] figS discrete-region metagene by decile, WGBS tail\n")
 
-# Step 18.1 - Longest mRNA per gene
+# longest mRNA per gene
 mrna <- as.data.table(gff[gff$type == "mRNA"])
 mrna[, mrna_id := sub(";.*", "", as.character(ID))]
 mrna[, g_id := vapply(Parent, function(x) if (length(x)) x[1] else NA_character_, character(1))]
@@ -589,7 +752,7 @@ mrna[, mlen := end - start + 1]; setorder(mrna, g_id, -mlen)
 mk_keep <- mrna[!duplicated(g_id), .(mrna_id, g_id, chr = as.character(seqnames),
                                      mstart = start, mend = end, mstrand = as.character(strand))]
 
-# Step 18.2 - Exons of those mRNAs in TSS-to-TES order, classified first/internal/last
+# exons of those mRNAs, ordered TSS->TES, classified first/internal/last
 ex <- as.data.table(gff[gff$type == "exon"])
 ex[, parent := vapply(Parent, function(x) if (length(x)) x[1] else NA_character_, character(1))]
 ex <- ex[parent %in% mk_keep$mrna_id, .(parent, chr = as.character(seqnames), start, end)]
@@ -597,11 +760,10 @@ ex <- merge(ex, mk_keep[, .(mrna_id, g_id, mstrand)], by.x = "parent", by.y = "m
 setorder(ex, g_id, start)
 ex[, idx := seq_len(.N), by = g_id]; ex[, n := .N, by = g_id]
 ex[mstrand == "-", idx := n - idx + 1L]
-# Genes need >= 3 exons so that first, internal and last classes all exist
 ex <- ex[n >= 3]                                          # need first/internal/last
 ex[, cls := fifelse(idx == 1L, "first_exon", fifelse(idx == n, "last_exon", "internal_exon"))]
 
-# Step 18.3 - Introns as gaps between consecutive exons, classified the same way
+# introns = gaps between consecutive exons of the same gene
 intr <- ex[, { o <- order(start); s <- start[o]; e <- end[o]
                if (length(s) >= 2L) list(istart = e[-length(e)] + 1L, iend = s[-1] - 1L,
                                          chr = chr[1], mstrand = mstrand[1]) else NULL },
@@ -611,7 +773,7 @@ intr[, idx := seq_len(.N), by = g_id]; intr[, n := .N, by = g_id]
 intr[mstrand == "-", idx := n - idx + 1L]
 intr[, cls := fifelse(idx == 1L, "first_intron", fifelse(idx == n, "last_intron", "internal_intron"))]
 
-# Step 18.4 - Promoter (2 kb), distal upstream (5 kb) and downstream (5 kb), strand-aware
+# promoter (2 kb), distal upstream (5 kb), downstream (5 kb), strand-aware
 mu <- mk_keep[g_id %in% unique(ex$g_id)]
 mu[, tss := fifelse(mstrand == "-", mend, mstart)]; mu[, tes := fifelse(mstrand == "-", mstart, mend)]
 mu[, `:=`(prom_s = fifelse(mstrand=="-", tss+1L, tss-2000L), prom_e = fifelse(mstrand=="-", tss+2000L, tss-1L),
@@ -620,7 +782,6 @@ mu[, `:=`(prom_s = fifelse(mstrand=="-", tss+1L, tss-2000L), prom_e = fifelse(ms
 mk <- function(rg, s, e) mu[, .(region = rg, chr, start = pmax(pmin(get(s), get(e)), 1L),
                                 end = pmax(get(s), get(e)), strand = mstrand, gene_id = g_id)]
 
-# Nine segments in TSS-to-TES order
 regs <- rbindlist(list(
   mk("distal_upstream","dist_s","dist_e"), mk("promoter","prom_s","prom_e"),
   ex[cls=="first_exon",      .(region="first_exon",      chr, start, end, strand=mstrand, gene_id=g_id)],
@@ -634,7 +795,7 @@ regs <- rbindlist(list(
 gene_dec <- unique(gene_full[, .(gene_id, decile)])[!is.na(decile)]
 regs <- regs[gene_id %in% gene_dec$gene_id]
 
-# Step 18.5 - Overlap pooled CpGs with each segment, 10 bins per segment, mean per decile
+# overlap pooled CpGs with each segment, bin to 10 along it (TSS->TES sense)
 setkey(regs, chr, start, end)
 ovr <- foverlaps(cpg_r, regs, by.x = c("chr","start","end"), nomatch = 0L)
 nbg <- 10L
@@ -646,7 +807,7 @@ gbin <- ovr[cvt > 0, .(beta = sum(beta*cvt)/sum(cvt)), by = .(gene_id, decile, r
 aggg <- gbin[, .(beta = mean(beta)), by = .(decile, region, bin)]
 fwrite(aggg, file.path(DAT, "metagene_region_decile.tsv"), sep = "\t")
 
-# Step 18.6 - Lay the nine segments on one x axis and draw the figure
+# lay the 9 segments side by side on one x-axis (widths ~ visual weight)
 rlev <- c("distal_upstream","promoter","first_exon","first_intron","internal_intron",
           "internal_exon","last_intron","last_exon","downstream")
 rlab <- c("Distal\nupstream","Promoter\n(2 kb)","First\nexon","First\nintron",
@@ -671,11 +832,39 @@ pg <- ggplot(aggg, aes(x, beta*100, colour = decile, group = interaction(decile,
        subtitle = sprintf("n = %s protein-coding genes (mRNA models with >= 3 exons); tail expression deciles", comma(uniqueN(gbin$gene_id)))) +
   theme_pub(base_size = 11) + theme(panel.grid = element_blank(),
                       axis.text.x = element_text(size = 9), legend.position = "right")
+# Supplementary: the bisulfite tail (pooled) version of the nine-segment metagene.
 save_fig(pg, FIGS, "figS_region_decile_metagene_wgbs_tail", 9.5, 4.0)
+# Per-condition versions of the same nine-segment metagene: blastema (A1+A2) is the
+# MAIN Fig 3B; control (C1+C2) is supplementary. Identical segments, binning, widths and layers.
+region_plot <- function(dd, ngenes, ttl, show_sub = TRUE) ggplot(dd, aes(x, beta*100, colour = decile, group = interaction(decile, region))) +
+  geom_vline(xintercept = rend[-length(rend)], colour = "grey60", linetype = "dashed", linewidth = 0.3) +
+  geom_vline(xintercept = rend["promoter"], colour = "#C0392B", linetype = "dashed", linewidth = 0.4) +
+  geom_point(size = 0.7, alpha = 0.5) +
+  geom_smooth(method = "loess", span = 0.35, se = FALSE, linewidth = 0.7) +
+  scale_colour_manual(values = setNames(DECILE_PAL, 1:10), name = "Expr decile", guide = guide_legend(reverse = TRUE)) +
+  scale_x_continuous(breaks = rmid, labels = rlab, expand = expansion(mult = c(0.01, 0.01))) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.05))) +
+  labs(x = NULL, y = "Mean CpG methylation β (%)", title = ttl,
+       subtitle = if (show_sub) sprintf("n = %s protein-coding genes (mRNA models with >= 3 exons); tail expression deciles", comma(ngenes)) else NULL) +
+  theme_pub(base_size = 11) + theme(panel.grid = element_blank(), axis.text.x = element_text(size = 9), legend.position = "right")
+for (cn in c("blastema", "control")) {
+  bgc <- if (cn == "blastema") "bg_a" else "bg_c"; cvc <- if (cn == "blastema") "cv_a" else "cv_c"
+  gbin_c <- ovr[get(cvc) > 0, .(beta = sum(get(bgc)*get(cvc))/sum(get(cvc))), by = .(gene_id, decile, region, bin)]
+  agg_c <- gbin_c[, .(beta = mean(beta)), by = .(decile, region, bin)]
+  fwrite(agg_c, file.path(DAT, sprintf("metagene_region_decile_%s.tsv", cn)), sep = "\t")
+  agg_c[, region := factor(region, levels = rlev)]; agg_c[, decile := factor(decile, levels = 1:10)]
+  agg_c[, x := rstart[as.character(region)] + (bin - 0.5)/nbg * rw[as.character(region)]]
+  p_c <- region_plot(agg_c, uniqueN(gbin_c$gene_id), if (cn == "blastema") "Methylation across discrete gene regions, blastema" else "Methylation across discrete gene regions, tail control (WGBS)", show_sub = cn != "blastema")
+  if (cn == "blastema") save_fig(p_c, FIGM, "fig2g_region_decile_metagene_blastema", 7.0, 2.7) else save_fig(p_c, FIGS, "figS_region_decile_metagene_wgbs_control", 9.5, 4.0)
+}
 
-# Step 19 - fig2g: the same discrete-region metagene on HiFi bodywall methylation
-cat("[8c] fig2g discrete-region metagene by decile, HiFi bodywall (MAIN)\n")
-# Deciles from bodywall expression (Step 15.2); segments and binning reused from Step 18
+# ---- [8c] fig2g: same discrete-region metagene, HiFi bodywall (MAIN) ----------
+# the MAIN panel (the WGBS
+# tail version above became supplementary). Exact same 9-segment machinery (regs,
+# widths, binning); methylation = pooled HiFi bodywall 5mC, deciles = bodywall
+# expression (irradiation CONTROLS dcrep1,2,3,6, decode verified against the
+# WGCNA metadata; dcrep4 is the excluded expression outlier).
+cat("[8c] fig2g discrete-region metagene by decile, HiFi bodywall (supplementary)\n")
 gene_dec_bw <- unique(gene_bw[!is.na(decile), .(gene_id, decile)])
 regs_bw <- regs[gene_id %in% gene_dec_bw$gene_id]
 setkey(regs_bw, chr, start, end)
@@ -706,15 +895,13 @@ pg_bw <- ggplot(agg_bw, aes(x, beta * 100, colour = decile,
   scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.05))) +
   labs(x = NULL, y = "Mean CpG methylation β (%)",
        title = "Methylation across discrete gene regions, bodywall",
-       subtitle = sprintf(
-         "n = %s protein-coding genes (mRNA models with >= 3 exons); bodywall expression deciles",
-         comma(uniqueN(gbin_bw$gene_id)))) +
+       subtitle = NULL) +
   theme_pub() + theme(panel.grid = element_blank(),
                       axis.text.x = element_text(size = 8),
                       legend.position = "right")
-save_fig(pg_bw, FIGM, "fig2g_region_decile_metagene_bodywall", 7.0, 2.7)
+save_fig(pg_bw, FIGS, "figS_region_decile_metagene_bodywall", 7.0, 2.7)
 
-# Step 20 - fig2i: sample PCA and correlation on 1 Mb-window beta
+# ---- [10] figS fig2i: sample PCA + correlation on 1 Mb-window beta ------------
 cat("[10] fig2i sample PCA (supp)\n")
 wmat <- dcast(per, chr + win ~ sample, value.var = "beta")
 wmat <- wmat[complete.cases(wmat)]
@@ -735,6 +922,9 @@ p_cor <- ggplot(cm_dt, aes(s1, s2, fill = r)) + geom_tile() +
 save_fig(p_pca | p_cor, FIGS, "fig2i_sample_pca_correlation", 10, 4.2)
 fwrite(pca_dt, file.path(DAT, "sample_pca_coords.tsv"), sep = "\t")
 
-# Step 21 - Record the package versions used by this run
+# silently inside a tryCatch on every run since the chr+mt rebuild (DNAStringSet
+# lacks the getSeq method MethylSeekR needs) and the paper never used it — the
+# only manuscript LMR call is 08_motifs's (cov>=10, pooled, Takai-Jones-calibrated).
+# Reproducibility: record the exact package versions this run used.
 writeLines(capture.output(sessionInfo()), file.path(BATCH, "sessionInfo_02_landscape.txt"))
 cat("[02_landscape] done\n")

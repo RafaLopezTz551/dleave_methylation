@@ -1,6 +1,4 @@
 #!/bin/bash
-# Launcher for 07_wgcna/code/07_wgcna.R: sets the R library path and a per-job scratch TMPDIR,
-# runs the module script from the module directory, then removes the scratch space.
 #SBATCH --job-name=07_wgcna
 #SBATCH --partition=defq
 #SBATCH --exclude=node09,node06
