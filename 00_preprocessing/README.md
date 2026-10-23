@@ -11,14 +11,13 @@ reads became the three inputs that `01_genome_toolkit` … `08_motifs` read by p
 | PacBio HiFi per site 5mC pileups (two bodywall animals) | ccs 8.3.0, jasmine, pbmm2 26.2.99, MethBat 1.1.0 | `pacbio_hifi/` |
 
 ## WGBS (`wgbs_bismark/`)
-Run in this order: `01_prepare_bismarck_genome.sh` (bisulfite genome index),
-`02_alignment_bismakr.sh` (paired end Bismark, `--parallel 4`), `03_aln_coverage_report.sh`,
+Run in this order: `01_prepare_bismark_genome.sh` (bisulfite genome index),
+`02_alignment_bismark.sh` (paired end Bismark, `--parallel 4`), `03_aln_coverage_report.sh`,
 `04_deduplicate_bams.sh` (`deduplicate_bismark`), `05_extract_methylation.sh`
 (`bismark_methylation_extractor --ignore_r2 2 --cytosine_report`; the per sample
 `*_splitting_report.txt` files give the CHH non conversion floor used in `04_TEs`),
 `05b_standalone_coverage2cytosine.sh`, and `10_dedup_bam_to_cram.slurm` (the deduplicated
-alignments kept as CRAM against the full assembly; `09_read_patterns` decodes them with
-that reference). The scripts are verbatim copies of the lab's run scripts; paths inside
+alignments kept as CRAM against the full assembly). The scripts are verbatim copies of the lab's run scripts; paths inside
 them point at the lab's storage layout and must be edited to yours.
 
 ## Bulk RNA-seq (`rnaseq_star_htseq/`)
@@ -33,9 +32,7 @@ produced with that flag, so they are reproduced exactly by these scripts; a re-a
 without it would recover those reads and change the counts slightly.
 
 ## PacBio HiFi (`pacbio_hifi/`)
-`copy_raw_hifi.slurm` stages the movies, `methbat_sample2.slurm` is the MethBat pileup
-recipe actually used (per site 5mC/5hmC/6mA, mapq ≥ 1, coverage ≥ 4, 20 bp edge trim);
-`pipeline.sh` / `pileups.sh` are the earlier modkit attempt kept as provenance (it was not
-used), and `per_6ma_s1.R` is the provenance copy that arrived with the source data.
-The honest 6mA / 5hmC treatment (binomial false positive null, fibertools re call) is in
-the paper's Methods and in the analysis folder of the working project.
+`copy_raw_hifi.slurm` stages the two bodywall movies (BW1, BW2; one of them is the dataset of the genome assembly,
+Miranda-Rodríguez et al. 2025) and `methbat_sample2.slurm` is the MethBat pileup recipe used for the per-site 5mC calls
+(mapq ≥ 1, coverage ≥ 4, 20 bp edge trim). Circular consensus with kinetics (ccs 8.3.0), jasmine and pbmm2 are run
+upstream as described in the manuscript Methods.
