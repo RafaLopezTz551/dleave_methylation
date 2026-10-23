@@ -18,7 +18,7 @@ Paths are the ALL-CAPS constants at the top of `code/07_wgcna.R`.
 - `data/` — tables (28 files, named in the script).
 - `objects/` — `wgcna.rds`.
 - `figures/main/` — `fig7a_module_dmp_fisher`, `fig7b_module_go_enrichment`, `fig7c_eigengene_scores_tail`, `fig7d_module_dmr_fisher`; more in `figures/supplementary/`.
-- Paper figures: Fig. 9, Fig. S12 (see `docs/FIGURES.md`).
+- Paper figures: Fig. 9AB, Fig. S13 (see `docs/FIGURES.md`).
 
 **Run**
 

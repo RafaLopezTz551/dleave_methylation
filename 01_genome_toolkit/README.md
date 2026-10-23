@@ -18,7 +18,7 @@ Paths are the ALL-CAPS constants at the top of `code/01_genome_toolkit.R`.
 - `data/` — tables (23 files, named in the script).
 - `objects/` — `genome_chrmt.rds`, `gff_chrmt.rds`, `seq/`, `diamond/`, `pfam/`, `trees/<family>/`.
 - `figures/main/` — `fig1a_dinucleotide_freq`, `fig1b_cpg_density_distribution`, `fig1c_cpg_oe_distribution`, `fig1d_gc_distribution`, `fig1e_mollusc_cpg_oe`, `fig2a_methylation_toolkit_presence`; more in `figures/supplementary/`.
-- Paper figures: Fig. 1, Fig. S1, Fig. S2, Fig. S10, Fig. S14, Fig. S15 (see `docs/FIGURES.md`).
+- Paper figures: Fig. 1ACD, Fig. S1, Fig. S2, Fig. S11B, Fig. S14, Fig. S15 (see `docs/FIGURES.md`).
 
 **Run**
 

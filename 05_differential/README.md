@@ -17,7 +17,7 @@ Paths are the ALL-CAPS constants at the top of `code/05_differential.R`.
 - `data/` — tables (33 files, named in the script).
 - `objects/` — `dmltest_chrmt_<chr>.rds`, `dmltest_chrmt.rds`, `dmltest_<swap>_chrmt_<chr>.rds`, `dmltest_<swap>_chrmt.rds`.
 - `figures/main/` — `fig5a_dmp_volcano`, `fig5b_dmr_volcano`, `fig5c_dmp_region_pie`, `fig5d_dmr_region_pie`, `fig5e2_dmr_region_enrichment`, `fig5e_dmp_region_enrichment`, `fig5f_top_dmp_burden_genes`, `fig5h_dmp_go_dotplot`; more in `figures/supplementary/`.
-- Paper figures: Fig. 7, Fig. 8, Fig. S10, Table S1 (see `docs/FIGURES.md`).
+- Paper figures: Fig. 7ABCD, Fig. 8A, Fig. S11A, Table S1 (see `docs/FIGURES.md`).
 
 **Run**
 

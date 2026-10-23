@@ -17,7 +17,7 @@ Paths are the ALL-CAPS constants at the top of `code/03_promoters.R`.
 
 - `data/` — tables (14 files, named in the script).
 - `figures/main/` — `fig3a_promoter_cpg_oe_histogram`, `fig3b_promoter_oe_distribution_by_class`, `fig3c_hcp_gene_list`, `fig3d_metagene_by_promoter_class`, `fig3e_promoter_cpg_oe_human_vs_dlaeve`, `fig3f_promoter_meth_vs_expression`, `fig3g_<species>_weber_class_go`; more in `figures/supplementary/`.
-- Paper figures: Fig. 4, Fig. 5, Fig. S7 (see `docs/FIGURES.md`).
+- Paper figures: Fig. 4ABC, Fig. 5BC, Fig. S7AB, Fig. S17, Table S2 (see `docs/FIGURES.md`).
 
 **Run**
 

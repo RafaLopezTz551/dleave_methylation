@@ -18,7 +18,8 @@ Paths are the ALL-CAPS constants at the top of `code/08_motifs.R`.
 - `data/` — tables (22 files, named in the script).
 - `objects/` — `methylseekr_segments_cov10_chrmt_gr.rds`, `cgi_takai_jones_chrmt.rds`, `jaspar_ortholog_homer.motif`, `lmr_deltameth_cov10_chrmt_se.rds`, `promoter_weber_pc_chrmt_se.rds`, `genome_chrmt.fa`, `human_promoter_weber_hs9606_se.rds`, `homer_<set>_chrmt/` ….
 - `figures/main/` — `fig8_lmr_motif_enrichment`, `fig8_umr_promoter_homer_motifs`; more in `figures/supplementary/`.
-- Paper figures: Fig. 5, Fig. 10, Fig. S8, Fig. S13 (see `docs/FIGURES.md`).
+- Paper figures: Fig. 5A, Fig. 10AB, Fig. S8AB, Fig. S16 (see `docs/FIGURES.md`).
+- `fig8_lmr_motif_enrichment` and `figS8_lmr_bin_density` (the LMR ΔMeth-binned test and its bins, with `lmr_bin_qc*.tsv`) are still written but are not in the manuscript since v20.5.
 
 **Run**
 

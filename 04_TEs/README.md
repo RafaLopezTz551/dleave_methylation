@@ -15,7 +15,7 @@ Paths are the ALL-CAPS constants at the top of `code/04_TEs.R`.
 
 - `data/` — tables (21 files, named in the script).
 - `figures/main/` — `fig4a_te_methylation_by_class_bodywall`, `fig4b_te_methylation_by_class_location_bodywall`, `fig4c_te_age_by_class_location_bodywall`; more in `figures/supplementary/`.
-- Paper figures: Fig. 6, Fig. S9 (see `docs/FIGURES.md`).
+- Paper figures: Fig. 6ABC, Fig. S9ABC (see `docs/FIGURES.md`).
 
 **Run**
 

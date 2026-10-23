@@ -52,7 +52,7 @@ size.
   means (methylated reads / total reads over the compartment's CpGs; promoter = 2 kb
   upstream; compartments overlap by construction), gene body β per gene against expression
   deciles (Spearman), TSS ± 5 kb and discrete region metagenes by decile (tail control, tail
-  blastema, HiFi bodywall with bodywall deciles), the blastema − control TSS difference
+  blastema, HiFi bodywall with bodywall deciles), the amputated − control TSS difference
   profile, mitochondrial methylation, and HiFi versus WGBS agreement (Pearson per CpG and per
   1 Mb window on the shared CpGs).
 
@@ -91,7 +91,7 @@ size.
   placements.
 * **Label swap null (reviewer control)**: the identical DSS procedure on the two mislabelled
   two versus two splits (C1+A1 vs C2+A2; C1+A2 vs C2+A1); counts and the fraction of true
-  label DMPs recovered are in `data/label_swap_counts.tsv`.
+  label DMPs recovered are in `data/label_swap_counts.tsv` (quoted in the manuscript Methods).
 * **Target size adjusted re-test (GOmeth)**: every DMP/DMR gene set is re-tested with the
   GOmeth procedure (missMethyl; the methylation form of the GOseq selection bias correction),
   implemented with goseq 1.58.0: a Wallenius non central hypergeometric test whose per gene
@@ -145,7 +145,9 @@ size.
   monaLisa binned enrichment against the other bins; **bin QC (reviewer control)**: width,
   CpG count, depth, control β and GC per bin with Kruskal–Wallis and Mann–Whitney tests
   (rank biserial r, positive when the extreme bin is larger), and Spearman of |Δβ| against each
-  metric over all binned LMRs (`lmr_bin_qc*.tsv`, `lmr_delta_vs_composition.tsv`).
+  metric over all binned LMRs (`lmr_bin_qc*.tsv`, `lmr_delta_vs_composition.tsv`). Not in the
+  manuscript since v20.5: the ETS enrichment in the two central bins follows their higher CpG
+  count and coverage, not the regeneration contrast.
 * **DMRs in LMRs and UMRs**: each DMR scored for overlap with any LMR and any UMR against
   1,000 random interval sets anchored on random analysed CpGs, once width matched and once
   matched on the number of analysed CpGs (both region classes are defined by CpG content);
@@ -161,3 +163,29 @@ size.
 * **Region sets**: HOMER `findMotifsGenome.pl -size given -nomotif -mknown` on UMR promoters
   (CpG matched background), LMRs and DMRs (GC matched background); results across region
   sets are not compared because their null models differ.
+
+## 09_revision_analyses — analyses added in the co-author review
+
+* **CpG O/E and regenerative capacity** (Fig. 1B): genome-wide CpG O/E per species from
+  `01_genome_toolkit`, with the regenerative capacity documented for each species (tail, *D. laeve*;
+  whole body from the head, *Elysia atroviridis*; eye, *Pomacea canaliculata*; arm, *Octopus bimaculoides*;
+  neurons, *Aplysia californica*) written under its bar.
+* **Toolkit E-values** (Fig. 1E): the best-scoring eggNOG-mapper hit per gene supplies the E-value shown
+  beside the bit score; absent families are drawn in grey.
+* **Region violins** (Fig. 2B): mean β per feature (promoter = 2 kb upstream of the TSS, exon, intron,
+  intergenic 2 kb tiles; ≥ 3 covered CpGs) from the pooled tail methylome; Kruskal-Wallis across the four
+  regions and pairwise Wilcoxon rank-sum tests, Benjamini-Hochberg adjusted
+  (`region_feature_beta_summary.tsv`, `region_pairwise_wilcoxon.tsv`).
+* **High methylation calls**: one-sided binomial test of the methylated read count of every CpG against the
+  highest per-library CHH non-conversion rate (0.3%) and against 1%, BH adjusted, pooled and per library; share of
+  CpGs above the genome-wide 99th coverage percentile (`high_methylation_false_positive_check.tsv`).
+* **Platform vs tissue**: at CpGs shared by WGBS and HiFi, the upper mode of each platform; HiFi β at CpGs fully
+  methylated in WGBS (β ≥ 95% in both conditions) by HiFi coverage bin; per gene, the WGBS − HiFi gap of methylated
+  genes (WGBS β ≥ 50%, ≥ 10 shared CpGs) against the tail vs bodywall difference in expression rank (Spearman,
+  linear model, Wilcoxon between concordant and tissue-specific genes) (`hifi_at_wgbs_*.tsv`,
+  `gap_by_expression_concordance.tsv`, `gene_platform_gap.tsv`).
+* **Rolling genome profile** (Fig. S3B): centered rolling mean over five 1 Mb bins per chromosome for the two tail
+  methylomes and the bodywall methylome.
+* **TE copies per class**: copies with methylation data per class and location on each platform
+  (`te_copies_per_class_plotted.tsv`).
+

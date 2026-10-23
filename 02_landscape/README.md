@@ -16,8 +16,8 @@ Paths are the ALL-CAPS constants at the top of `code/02_landscape.R`.
 
 - `data/` — tables (18 files, named in the script).
 - `objects/` — `bsseq_cov5_chrmt.rds`, `hifi_bodywall_cpg_persample_chrmt.rds`.
-- `figures/main/` — `fig2a_global_methylation_per_sample`, `fig2b_genomewide_1mb`, `fig2d_tss5kb_metagene_decile`, `fig2e_region_methylation`, `fig2f_genebody_methylation_decile`, `fig2g_region_decile_metagene_bodywall`, `fig2j_region_methylation_pie`; more in `figures/supplementary/`.
-- Paper figures: Fig. 2, Fig. 3, Fig. S3, Fig. S4, Fig. S5, Fig. S6 (see `docs/FIGURES.md`).
+- `figures/main/` — `fig2a_global_methylation_per_sample`, `fig2b_genomewide_1mb`, `fig2d_tss5kb_metagene_decile_blastema`, `fig2e_region_methylation`, `fig2f_genebody_methylation_decile_blastema`, `fig2g_region_decile_metagene_blastema`, `fig2j_region_methylation_pie`; supplementary panels (control and pooled versions, the three-condition TSS metagene, the bodywall region metagene) in `figures/supplementary/`.
+- Paper figures: Fig. 2A, Fig. 3ABC, Fig. S3A, Fig. S4, Fig. S5, Fig. S6 (see `docs/FIGURES.md`).
 
 **Run**
 

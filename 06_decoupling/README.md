@@ -16,7 +16,7 @@ Paths are the ALL-CAPS constants at the top of `code/06_decoupling.R`.
 
 - `data/` — tables (6 files, named in the script).
 - `figures/main/` — `fig6a_decoupling_three_axes`; more in `figures/supplementary/`.
-- Paper figures: Fig. S11 (see `docs/FIGURES.md`).
+- Paper figures: Fig. S10ABCD, Fig. S12ABCDE, Table S3 (see `docs/FIGURES.md`).
 
 **Run**
 
